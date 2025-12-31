@@ -4,6 +4,7 @@ import type { AppContext } from '../types.js';
 import { syncRolesOnce } from '../discord/roleSync.js';
 import { reconcileVerificationThreadForUser } from '../discord/join.js';
 import { pollWarOnce } from './war.js';
+import { dbGetJobState, dbSetJobState } from '../db.js';
 
 export function startScheduler(ctx: AppContext, client: Client) {
   cron.schedule(ctx.cfg.ROLE_SYNC_CRON, async () => {
@@ -11,14 +12,20 @@ export function startScheduler(ctx: AppContext, client: Client) {
       const guild = await client.guilds.fetch(ctx.cfg.GUILD_ID);
       await syncRolesOnce(ctx, guild);
 
-      // If a linked user deleted/left their profile thread (and the verification channel is hidden),
-      // recreate/re-open it automatically.
-      const linked = ctx.db.prepare('SELECT discord_user_id FROM user_links').all() as Array<{
-        discord_user_id: string;
-      }>;
-      for (const row of linked) {
-        await reconcileVerificationThreadForUser(ctx, client, row.discord_user_id);
-        await new Promise((r) => setTimeout(r, 150));
+      // Reconcile profile threads occasionally (not every minute) to avoid API churn and "spammy" edits.
+      const lastKey = 'verify:reconcile:last_ms';
+      const lastRaw = dbGetJobState(ctx.db, lastKey);
+      const last = lastRaw ? Number(lastRaw) : 0;
+      const shouldRun = !Number.isFinite(last) || Date.now() - last > 30 * 60_000;
+      if (shouldRun) {
+        dbSetJobState(ctx.db, lastKey, String(Date.now()));
+        const linked = ctx.db.prepare('SELECT discord_user_id FROM user_links').all() as Array<{
+          discord_user_id: string;
+        }>;
+        for (const row of linked) {
+          await reconcileVerificationThreadForUser(ctx, client, row.discord_user_id);
+          await new Promise((r) => setTimeout(r, 150));
+        }
       }
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);

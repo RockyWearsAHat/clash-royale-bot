@@ -26,6 +26,16 @@ const EnvSchema = z.object({
   ROLE_SYNC_CRON: z.string().min(1).default('*/1 * * * *'),
   WAR_POLL_CRON: z.string().min(1).default('*/1 * * * *'),
 
+  WARLOGS_DEBUG: z
+    .enum(['true', 'false'])
+    .optional()
+    .transform((v) => (v ?? 'false') === 'true'),
+  // Comma-separated roster names to debug in /warlogs (e.g. "Natedawg, Alice").
+  WARLOGS_DEBUG_PLAYERS: z
+    .string()
+    .optional()
+    .transform((v) => v ?? ''),
+
   PERMISSIONS_ENFORCE_ON_STARTUP: z
     .enum(['true', 'false'])
     .optional()

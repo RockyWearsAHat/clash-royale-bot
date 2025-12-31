@@ -6,11 +6,53 @@ import {
 } from 'discord.js';
 import type { SlashCommand } from './commands.js';
 import type { AppContext } from '../types.js';
+import { chunkLinesForEmbed, infoEmbed } from './ui.js';
 
-type ParticipantSnapshot = { decksUsed?: number; fame?: number; repairs?: number };
+type ParticipantSnapshot = {
+  decksUsed?: number;
+  fame?: number;
+  repairs?: number;
+  boatAttacks?: number;
+};
 
 function safeNumber(v: unknown): number | undefined {
   if (typeof v === 'number' && Number.isFinite(v)) return v;
+  if (typeof v === 'string' && v.trim()) {
+    const n = Number(v);
+    if (Number.isFinite(n)) return n;
+  }
+  return undefined;
+}
+
+function normalizeTagUpper(raw: unknown): string | undefined {
+  const s = typeof raw === 'string' ? raw.trim() : '';
+  if (!s) return undefined;
+  const up = s.toUpperCase();
+  return up.startsWith('#') ? up : `#${up}`;
+}
+
+function pickMaxNumber(obj: any, keys: string[]): number | undefined {
+  let best: number | undefined;
+  for (const k of keys) {
+    const v = obj?.[k];
+    const n = safeNumber(v);
+    if (n === undefined) continue;
+    best = best === undefined ? n : Math.max(best, n);
+  }
+  return best;
+}
+
+function normalizeName(raw: string): string {
+  return raw.trim().toLowerCase();
+}
+
+function findRawParticipantByTag(payload: any, tagUpper: string): any | undefined {
+  const participants = payload?.clan?.participants;
+  if (!Array.isArray(participants)) return undefined;
+  for (const p of participants) {
+    const t = normalizeTagUpper(p?.tag ?? p?.playerTag ?? p?.memberTag);
+    if (t === tagUpper) return p;
+  }
   return undefined;
 }
 
@@ -20,13 +62,21 @@ function extractParticipants(payload: any): Map<string, ParticipantSnapshot> {
 
   const out = new Map<string, ParticipantSnapshot>();
   for (const p of participants) {
-    const tag = typeof p?.tag === 'string' ? p.tag.toUpperCase() : undefined;
+    const tag = normalizeTagUpper(p?.tag ?? p?.playerTag ?? p?.memberTag);
     if (!tag) continue;
 
     out.set(tag, {
-      decksUsed: safeNumber(p.decksUsed ?? p.decksUsedToday ?? p.decksUsedThisDay),
-      fame: safeNumber(p.fame),
-      repairs: safeNumber(p.repairs),
+      decksUsed: pickMaxNumber(p, [
+        'decksUsed',
+        'decksUsedToday',
+        'decksUsedThisDay',
+        'decksUsedThisPeriod',
+        'decksUsedInPeriod',
+        'decksUsedInDay',
+      ]),
+      fame: pickMaxNumber(p, ['fame', 'fameToday', 'currentFame']),
+      repairs: pickMaxNumber(p, ['repairs', 'repairsToday', 'repairPoints', 'repairPointsToday']),
+      boatAttacks: pickMaxNumber(p, ['boatAttacks', 'boatAttacksToday']),
     });
   }
   return out;
@@ -35,21 +85,6 @@ function extractParticipants(payload: any): Map<string, ParticipantSnapshot> {
 function pct(n: number): string {
   if (!Number.isFinite(n)) return '0%';
   return `${n.toFixed(1)}%`;
-}
-
-function chunkLines(header: string, lines: string[], maxLen = 1900): string[] {
-  const out: string[] = [];
-  let cur = header;
-  for (const line of lines) {
-    if ((cur + '\n' + line).length > maxLen) {
-      out.push(cur);
-      cur = header + '\n' + line;
-    } else {
-      cur += '\n' + line;
-    }
-  }
-  out.push(cur);
-  return out;
 }
 
 export const WarStatsCommand: SlashCommand = {
@@ -76,7 +111,8 @@ export const WarStatsCommand: SlashCommand = {
       return;
     }
 
-    await interaction.deferReply({ ephemeral: false });
+    // Keep stats clean & non-intrusive in the war-logs channel.
+    await interaction.deferReply({ ephemeral: true });
 
     const [payload, log, roster] = await Promise.all([
       ctx.clash.getCurrentRiverRace(ctx.cfg.CLASH_CLAN_TAG),
@@ -87,7 +123,90 @@ export const WarStatsCommand: SlashCommand = {
     const participants = extractParticipants(payload);
 
     const nameByTag = new Map<string, string>();
-    for (const m of roster) nameByTag.set(m.tag.toUpperCase(), m.name);
+    for (const m of roster) {
+      const tag = normalizeTagUpper(m.tag);
+      if (tag) nameByTag.set(tag, m.name);
+    }
+
+    if (ctx.cfg.WARLOGS_DEBUG) {
+      const debugTargets = ctx.cfg.WARLOGS_DEBUG_PLAYERS.split(',')
+        .map((s) => s.trim())
+        .filter(Boolean);
+
+      const periodType = typeof payload?.periodType === 'string' ? payload.periodType : undefined;
+      const idx =
+        (typeof payload?.periodIndex !== 'undefined' ? payload.periodIndex : undefined) ??
+        (typeof payload?.dayIndex !== 'undefined' ? payload.dayIndex : undefined) ??
+        (typeof payload?.warDay !== 'undefined' ? payload.warDay : undefined) ??
+        (typeof payload?.sectionIndex !== 'undefined' ? payload.sectionIndex : undefined);
+
+      const rawParticipants: any[] = Array.isArray(payload?.clan?.participants)
+        ? payload.clan.participants
+        : [];
+      const sampleTags = rawParticipants
+        .slice(0, 10)
+        .map((p) => normalizeTagUpper(p?.tag ?? p?.playerTag ?? p?.memberTag) ?? '(missing tag)');
+
+      console.log(
+        '[warlogs debug] periodType=%s idx=%s participants=%d sampleTags=%j',
+        periodType ?? '(unknown)',
+        idx ?? '(unknown)',
+        rawParticipants.length,
+        sampleTags,
+      );
+
+      if (debugTargets.length) {
+        const rosterByName = new Map<string, { tag: string; name: string }>();
+        for (const m of roster) {
+          const t = normalizeTagUpper(m.tag);
+          if (!t) continue;
+          rosterByName.set(normalizeName(m.name), { tag: t, name: m.name });
+        }
+
+        for (const targetName of debugTargets) {
+          const rosterHit = rosterByName.get(normalizeName(targetName));
+          if (!rosterHit) {
+            console.log('[warlogs debug] roster lookup failed for name=%j', targetName);
+            continue;
+          }
+
+          const raw = findRawParticipantByTag(payload, rosterHit.tag);
+          const snap = participants.get(rosterHit.tag);
+          const decks = snap?.decksUsed ?? 0;
+          const fame = snap?.fame ?? 0;
+          const repairs = snap?.repairs ?? 0;
+          const boatAttacks = snap?.boatAttacks ?? 0;
+          const wouldBeNoBattles = decks <= 0 && fame <= 0 && repairs <= 0 && boatAttacks <= 0;
+          console.log(
+            '[warlogs debug] player=%s tag=%s inParticipantsMap=%s decks=%s fame=%s repairs=%s rawKeys=%j',
+            rosterHit.name,
+            rosterHit.tag,
+            String(Boolean(snap)),
+            String(snap?.decksUsed ?? '(none)'),
+            String(snap?.fame ?? '(none)'),
+            String(snap?.repairs ?? '(none)'),
+            raw ? Object.keys(raw) : '(no raw participant entry)',
+          );
+          console.log(
+            '[warlogs debug] computed wouldBeNoBattles=%s (decks=%s fame=%s repairs=%s boatAttacks=%s)',
+            String(wouldBeNoBattles),
+            String(decks),
+            String(fame),
+            String(repairs),
+            String(boatAttacks),
+          );
+          if (raw) {
+            console.log(
+              '[warlogs debug] raw decksUsed=%s decksUsedToday=%s decksUsedThisDay=%s',
+              String(raw?.decksUsed ?? '(missing)'),
+              String(raw?.decksUsedToday ?? '(missing)'),
+              String(raw?.decksUsedThisDay ?? '(missing)'),
+            );
+            console.log('[warlogs debug] rawParticipant=%j', raw);
+          }
+        }
+      }
+    }
 
     const items: any[] = Array.isArray(log?.items) ? log.items : [];
     const clanTag = ctx.cfg.CLASH_CLAN_TAG.toUpperCase();
@@ -155,7 +274,7 @@ export const WarStatsCommand: SlashCommand = {
     const noBattles: string[] = [];
 
     const tags = roster.length
-      ? roster.map((m) => m.tag.toUpperCase())
+      ? roster.map((m) => normalizeTagUpper(m.tag)).filter((t): t is string => Boolean(t))
       : Array.from(participants.keys());
     const scored = tags.map((tag) => {
       const snap = participants.get(tag) ?? {};
@@ -168,20 +287,30 @@ export const WarStatsCommand: SlashCommand = {
 
     for (const { tag, fame, decks } of scored) {
       const name = nameByTag.get(tag) ?? tag;
-      lines.push(`- ${name} (${tag}): ${fame} points`);
-      if ((decks ?? 0) <= 0 && (fame ?? 0) <= 0) noBattles.push(`${name} (${tag})`);
+      lines.push(`• **${name}**: ${fame} points`);
+      const snap = participants.get(tag) ?? {};
+      const repairs = snap.repairs ?? 0;
+      const boatAttacks = snap.boatAttacks ?? 0;
+      if ((decks ?? 0) <= 0 && (fame ?? 0) <= 0 && repairs <= 0 && boatAttacks <= 0)
+        noBattles.push(`${name}`);
     }
 
-    const header = 'Current day participation (points):';
-    const chunks = chunkLines(header, lines);
-    await interaction.editReply({ embeds: [embed], content: chunks[0] });
-    for (const extra of chunks.slice(1)) {
-      await interaction.followUp({ content: extra });
-    }
+    const participationChunks = chunkLinesForEmbed(lines);
+    const noBattlesText = noBattles.length ? noBattles.join(', ') : '(none)';
 
-    await interaction.followUp({
-      content: noBattles.length ? `No battles: ${noBattles.join(', ')}` : 'No battles: (none)',
-    });
+    const firstParticipation = infoEmbed(
+      'Participation (today)',
+      participationChunks[0] + `\n\n**No battles:** ${noBattlesText}`,
+    );
+
+    await interaction.editReply({ embeds: [embed, firstParticipation] });
+
+    for (const extra of participationChunks.slice(1)) {
+      await interaction.followUp({
+        ephemeral: true,
+        embeds: [infoEmbed('Participation (cont.)', extra)],
+      });
+    }
   },
 };
 

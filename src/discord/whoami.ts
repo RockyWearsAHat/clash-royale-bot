@@ -1,6 +1,7 @@
 import { SlashCommandBuilder, type ChatInputCommandInteraction } from 'discord.js';
 import type { SlashCommand } from './commands.js';
 import type { AppContext } from '../types.js';
+import { infoEmbed } from './ui.js';
 
 export const WhoAmICommand: SlashCommand = {
   data: new SlashCommandBuilder()
@@ -13,12 +14,15 @@ export const WhoAmICommand: SlashCommand = {
 
     if (!row) {
       await interaction.reply({
-        content: 'No linked player tag. Use /join to link one.',
+        embeds: [infoEmbed('Not linked yet', 'Use `/join` to link your Clash Royale player tag.')],
         ephemeral: true,
       });
       return;
     }
 
-    await interaction.reply({ content: `Linked player tag: ${row.player_tag}`, ephemeral: true });
+    await interaction.reply({
+      embeds: [infoEmbed('Linked account', `Player tag: **${row.player_tag}**`)],
+      ephemeral: true,
+    });
   },
 };

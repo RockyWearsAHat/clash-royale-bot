@@ -7,6 +7,8 @@ type ParticipantSnapshot = {
   decksUsed?: number;
   fame?: number;
   repairs?: number;
+  boatAttacks?: number;
+  name?: string;
 };
 
 const scheduledWarDaySnapshots = new Map<string, NodeJS.Timeout>();
@@ -48,7 +50,29 @@ function chunkEmbedDescriptions(lines: string[], maxLen = 3900): string[] {
 
 function safeNumber(v: unknown): number | undefined {
   if (typeof v === 'number' && Number.isFinite(v)) return v;
+  if (typeof v === 'string' && v.trim()) {
+    const n = Number(v);
+    if (Number.isFinite(n)) return n;
+  }
   return undefined;
+}
+
+function normalizeTagUpper(raw: unknown): string | undefined {
+  const s = typeof raw === 'string' ? raw.trim() : '';
+  if (!s) return undefined;
+  const up = s.toUpperCase();
+  return up.startsWith('#') ? up : `#${up}`;
+}
+
+function pickMaxNumber(obj: any, keys: string[]): number | undefined {
+  let best: number | undefined;
+  for (const k of keys) {
+    const v = obj?.[k];
+    const n = safeNumber(v);
+    if (n === undefined) continue;
+    best = best === undefined ? n : Math.max(best, n);
+  }
+  return best;
 }
 
 function extractParticipants(payload: any): Map<string, ParticipantSnapshot> {
@@ -58,13 +82,22 @@ function extractParticipants(payload: any): Map<string, ParticipantSnapshot> {
 
   const out = new Map<string, ParticipantSnapshot>();
   for (const p of participants) {
-    const tag = typeof p?.tag === 'string' ? p.tag.toUpperCase() : undefined;
+    const tag = normalizeTagUpper(p?.tag ?? p?.playerTag ?? p?.memberTag);
     if (!tag) continue;
 
     out.set(tag, {
-      decksUsed: safeNumber(p.decksUsed ?? p.decksUsedToday ?? p.decksUsedThisDay),
-      fame: safeNumber(p.fame),
-      repairs: safeNumber(p.repairs),
+      decksUsed: pickMaxNumber(p, [
+        'decksUsed',
+        'decksUsedToday',
+        'decksUsedThisDay',
+        'decksUsedThisPeriod',
+        'decksUsedInPeriod',
+        'decksUsedInDay',
+      ]),
+      fame: pickMaxNumber(p, ['fame', 'fameToday', 'currentFame']),
+      repairs: pickMaxNumber(p, ['repairs', 'repairsToday', 'repairPoints', 'repairPointsToday']),
+      boatAttacks: pickMaxNumber(p, ['boatAttacks', 'boatAttacksToday']),
+      name: typeof p?.name === 'string' && p.name.trim() ? p.name.trim() : undefined,
     });
   }
   return out;
@@ -95,6 +128,34 @@ function findPeriodEndTime(payload: any): { raw?: string; at?: Date } {
     undefined;
   const at = parseClashApiTime(raw);
   return { raw, at: at ?? undefined };
+}
+
+function toFiniteInt(v: unknown): number | undefined {
+  if (typeof v === 'number' && Number.isFinite(v)) return Math.trunc(v);
+  if (typeof v === 'string' && v.trim()) {
+    const n = Number(v);
+    if (Number.isFinite(n)) return Math.trunc(n);
+  }
+  return undefined;
+}
+
+// "Regular" river-race battle days are days 1-4 (not prep/training).
+// The Clash payloads vary; we best-effort detect a day index.
+function isRegularWarBattleDay(payload: any): boolean {
+  const periodType = typeof payload?.periodType === 'string' ? payload.periodType : undefined;
+  if (periodType !== 'warDay') return false;
+
+  // Common fields seen across payload variants.
+  const idx =
+    toFiniteInt(payload?.periodIndex) ??
+    toFiniteInt(payload?.dayIndex) ??
+    toFiniteInt(payload?.warDay) ??
+    toFiniteInt(payload?.sectionIndex);
+
+  // If we can't find an index, fall back to periodType alone.
+  if (idx === undefined) return true;
+
+  return idx >= 1 && idx <= 4;
 }
 
 function buildWarKey(clanTagUpper: string, item: any): string {
@@ -140,8 +201,7 @@ async function maybePostWarDayEndSnapshot(
   payload: any,
   current: Map<string, ParticipantSnapshot>,
 ) {
-  const periodType = typeof payload?.periodType === 'string' ? payload.periodType : undefined;
-  if (periodType !== 'warDay') return;
+  if (!isRegularWarBattleDay(payload)) return;
 
   const { raw: endRaw, at: endAt } = findPeriodEndTime(payload);
   if (!endRaw || !endAt) return;
@@ -152,7 +212,7 @@ async function maybePostWarDayEndSnapshot(
   if (!(msLeft > 0 && msLeft <= 60_000)) return;
 
   const snapshotKey = `war:day_snapshot:last_key`;
-  const key = `${periodType}:${endRaw}`;
+  const key = `warDay:${endRaw}`;
   const prevKey = dbGetJobState(ctx.db, snapshotKey);
   if (prevKey === key) return;
 
@@ -192,16 +252,18 @@ async function postWarDaySnapshotNow(
   const current = extractParticipants(payload);
 
   const { raw: endRaw2 } = findPeriodEndTime(payload);
-  const periodType2 = typeof payload?.periodType === 'string' ? payload.periodType : undefined;
-  if (periodType2 !== 'warDay') return;
-  if (!endRaw2 || `${periodType2}:${endRaw2}` !== key) return;
+  if (!isRegularWarBattleDay(payload)) return;
+  if (!endRaw2 || `warDay:${endRaw2}` !== key) return;
 
   const prevRaw = dbGetJobState(ctx.db, 'war:day_snapshot:last_snapshot');
   const prev = new Map<string, ParticipantSnapshot>();
   if (prevRaw) {
     try {
       const obj = JSON.parse(prevRaw) as Record<string, ParticipantSnapshot>;
-      for (const [tag, snap] of Object.entries(obj)) prev.set(tag.toUpperCase(), snap);
+      for (const [tag, snap] of Object.entries(obj)) {
+        const norm = normalizeTagUpper(tag);
+        if (norm) prev.set(norm, snap);
+      }
     } catch {
       // ignore
     }
@@ -209,9 +271,14 @@ async function postWarDaySnapshotNow(
 
   const roster = await ctx.clash.getClanMembers(ctx.cfg.CLASH_CLAN_TAG).catch(() => []);
   const nameByTag = new Map<string, string>();
-  for (const m of roster) nameByTag.set(m.tag.toUpperCase(), m.name);
+  for (const m of roster) {
+    const tag = normalizeTagUpper(m.tag);
+    if (tag) nameByTag.set(tag, m.name);
+  }
 
-  const tags = roster.length ? roster.map((m) => m.tag.toUpperCase()) : Array.from(current.keys());
+  const tags = roster.length
+    ? roster.map((m) => normalizeTagUpper(m.tag)).filter((t): t is string => Boolean(t))
+    : Array.from(current.keys());
   const scored = tags.map((tag) => {
     const before = prev.get(tag) ?? {};
     const after = current.get(tag) ?? {};
@@ -226,23 +293,36 @@ async function postWarDaySnapshotNow(
   const noBattles: string[] = [];
   for (const { tag, dFame, dDecks } of scored) {
     const name = nameByTag.get(tag) ?? tag;
-    lines.push(`- ${name} (${tag}): ${dFame} points`);
-    if (dDecks <= 0 && dFame <= 0) noBattles.push(`${name} (${tag})`);
+    lines.push(`• **${name}**: ${dFame} points`);
+    if (dDecks <= 0 && dFame <= 0) noBattles.push(`${name}`);
   }
 
+  const ts = new Date();
   const header = `War day snapshot (ending ${endAt.toLocaleString()}):`;
-  for (const chunk of chunkLines(header, lines)) {
-    await channel.send({ content: chunk }).catch(() => undefined);
+  const chunks = chunkEmbedDescriptions([`**${header}**`, ...lines]);
+
+  const noBattlesText = noBattles.length
+    ? noBattles.length > 40
+      ? `${noBattles.slice(0, 40).join(', ')} … (+${noBattles.length - 40} more)`
+      : noBattles.join(', ')
+    : '(none)';
+
+  for (let i = 0; i < chunks.length; i += 1) {
+    const embed = new EmbedBuilder()
+      .setTitle('War Day Summary')
+      .setDescription(chunks[i])
+      .setFooter({ text: ts.toLocaleString() });
+    if (i === 0) embed.addFields({ name: 'No battles', value: noBattlesText });
+    if (chunks.length > 1) embed.setAuthor({ name: `Part ${i + 1} of ${chunks.length}` });
+    await channel.send({ embeds: [embed] }).catch(() => undefined);
   }
-  await channel
-    .send({
-      content: noBattles.length ? `No battles: ${noBattles.join(', ')}` : 'No battles: (none)',
-    })
-    .catch(() => undefined);
 
   // Persist baseline for next day and dedupe key.
   const serialized: Record<string, ParticipantSnapshot> = {};
-  for (const [tag, snap] of current.entries()) serialized[tag.toUpperCase()] = snap;
+  for (const [tag, snap] of current.entries()) {
+    const norm = normalizeTagUpper(tag);
+    if (norm) serialized[norm] = snap;
+  }
   dbSetJobState(ctx.db, 'war:day_snapshot:last_snapshot', JSON.stringify(serialized));
   dbSetJobState(ctx.db, snapshotKey, key);
 }
@@ -272,6 +352,8 @@ export async function pollWarOnce(ctx: AppContext, client: Client) {
   if (!channel || channel.type !== ChannelType.GuildText) return;
 
   const payload = await ctx.clash.getCurrentRiverRace(ctx.cfg.CLASH_CLAN_TAG);
+  const periodType = typeof payload?.periodType === 'string' ? payload.periodType : undefined;
+  const isBattleDay = isRegularWarBattleDay(payload);
 
   // Best-effort: keep an accumulated war history in SQLite.
   await ingestRiverRaceLog(ctx).catch(() => undefined);
@@ -286,14 +368,18 @@ export async function pollWarOnce(ctx: AppContext, client: Client) {
   if (prevRaw) {
     try {
       const obj = JSON.parse(prevRaw) as Record<string, ParticipantSnapshot>;
-      for (const [tag, snap] of Object.entries(obj)) prev.set(tag, snap);
+      for (const [tag, snap] of Object.entries(obj)) {
+        const norm = normalizeTagUpper(tag);
+        if (norm) prev.set(norm, snap);
+      }
     } catch {
       // ignore
     }
   }
 
   const changes = diffSnapshots(prev, next);
-  if (changes.length) {
+  // Keep war-logs quiet on prep/training days.
+  if (isBattleDay && changes.length) {
     const lines = changes.map(({ tag, before, after }) => {
       const bDecks = before?.decksUsed ?? 0;
       const aDecks = after.decksUsed ?? bDecks;
@@ -308,7 +394,8 @@ export async function pollWarOnce(ctx: AppContext, client: Client) {
       if (Number.isFinite(dFame) && dFame !== 0) parts.push(`fame ${dFame > 0 ? '+' : ''}${dFame}`);
       if (!parts.length) parts.push('updated');
 
-      return `${tag}: ${parts.join(', ')}`;
+      const label = after.name ? `**${after.name}**` : `**${tag}**`;
+      return `${label}: ${parts.join(', ')}`;
     });
 
     const ts = new Date();
@@ -325,11 +412,13 @@ export async function pollWarOnce(ctx: AppContext, client: Client) {
 
   // Persist next snapshot
   const serialized: Record<string, ParticipantSnapshot> = {};
-  for (const [tag, snap] of next.entries()) serialized[tag] = snap;
+  for (const [tag, snap] of next.entries()) {
+    const norm = normalizeTagUpper(tag);
+    if (norm) serialized[norm] = snap;
+  }
   dbSetJobState(ctx.db, 'war:last_participants', JSON.stringify(serialized));
 
   // Announcements based on periodType changes.
-  const periodType = typeof payload?.periodType === 'string' ? payload.periodType : undefined;
   if (periodType) {
     const prevPeriod = dbGetJobState(ctx.db, 'war:last_period_type');
     if (prevPeriod !== periodType) {
@@ -337,8 +426,20 @@ export async function pollWarOnce(ctx: AppContext, client: Client) {
 
       const ann = await guild.channels.fetch(ctx.cfg.CHANNEL_ANNOUNCEMENTS_ID);
       if (ann && ann.type === ChannelType.GuildText) {
-        if (prevPeriod && periodType === 'warDay') {
-          await ann.send({ content: 'War day started — get your decks in.' });
+        // Only announce the start of the regular war battle days (day 1).
+        const idx =
+          toFiniteInt(payload?.periodIndex) ??
+          toFiniteInt(payload?.dayIndex) ??
+          toFiniteInt(payload?.warDay) ??
+          toFiniteInt(payload?.sectionIndex);
+
+        if (prevPeriod && isBattleDay && (idx === undefined || idx === 1)) {
+          await ann
+            .send({
+              content: '@everyone War day started — do your battles.',
+              allowedMentions: { parse: ['everyone'] },
+            })
+            .catch(() => undefined);
         }
       }
     }
