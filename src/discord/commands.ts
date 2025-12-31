@@ -1,5 +1,6 @@
 import { SlashCommandBuilder, type ChatInputCommandInteraction, type Client } from 'discord.js';
 import type { AppContext } from '../types.js';
+import { errorEmbed, safeReply } from './ui.js';
 
 export type SlashCommand = {
   data: SlashCommandBuilder;
@@ -17,17 +18,15 @@ export async function registerHandlers(client: Client, ctx: AppContext, commands
       await command.execute(ctx, interaction);
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
-      if (interaction.isRepliable()) {
-        if (interaction.deferred || interaction.replied) {
-          await interaction
-            .followUp({ content: `Error: ${msg}`, ephemeral: true })
-            .catch(() => undefined);
-        } else {
-          await interaction
-            .reply({ content: `Error: ${msg}`, ephemeral: true })
-            .catch(() => undefined);
-        }
-      }
+      await safeReply(interaction, {
+        ephemeral: true,
+        embeds: [
+          errorEmbed(
+            'Something went wrong',
+            `I hit an error while running "/${interaction.commandName}".\n\n${msg}`,
+          ),
+        ],
+      });
     }
   });
 }

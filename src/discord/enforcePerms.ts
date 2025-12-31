@@ -6,6 +6,7 @@ import {
 import type { SlashCommand } from './commands.js';
 import type { AppContext } from '../types.js';
 import { enforceChannelPermissions } from './permissions.js';
+import { asCodeBlock, errorEmbed, successEmbed } from './ui.js';
 
 export const EnforcePermsCommand: SlashCommand = {
   data: new SlashCommandBuilder()
@@ -16,7 +17,10 @@ export const EnforcePermsCommand: SlashCommand = {
   async execute(ctx: AppContext, interaction: ChatInputCommandInteraction) {
     const perms = interaction.memberPermissions;
     if (!perms?.has(PermissionsBitField.Flags.Administrator)) {
-      await interaction.reply({ content: 'Admin only.', ephemeral: true });
+      await interaction.reply({
+        ephemeral: true,
+        embeds: [errorEmbed('Nope', 'This command is admin-only.')],
+      });
       return;
     }
 
@@ -25,12 +29,20 @@ export const EnforcePermsCommand: SlashCommand = {
     const guild = await interaction.client.guilds.fetch(ctx.cfg.GUILD_ID);
     try {
       await enforceChannelPermissions(ctx, interaction.client, guild);
-      await interaction.editReply('Permissions enforced successfully.');
+      await interaction.editReply({
+        embeds: [successEmbed('Done', 'Permissions were enforced successfully.')],
+      });
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
-      // Keep within Discord 2000 char limit
-      const clipped = msg.length > 1800 ? `${msg.slice(0, 1800)}…` : msg;
-      await interaction.editReply(clipped);
+      const clipped = msg.length > 1500 ? `${msg.slice(0, 1500)}…` : msg;
+      await interaction.editReply({
+        embeds: [
+          errorEmbed(
+            'Permission enforcement failed',
+            `Discord rejected one or more overwrite edits.${asCodeBlock(clipped)}`,
+          ),
+        ],
+      });
     }
   },
 };

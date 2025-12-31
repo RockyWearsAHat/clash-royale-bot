@@ -5,7 +5,16 @@ A Discord bot that:
 - Links Discord users to Clash Royale player tags
 - Polls the Clash Royale API for clan membership & roles
 - Keeps Discord roles in sync (member/elder/co-leader/leader)
-- Prepares for war participation logs + announcements
+- Logs war participation (delta updates + end-of-day snapshots)
+- Provides slash commands for linking and stats
+
+Key commands:
+
+- `/join` — link your Discord user to a Clash Royale player tag
+- `/whoami` — show your linked tag
+- `/unlink` — remove your linked tag
+- `/warstats` (alias: `/warlogs`) — show current war stats (restricted to the war-logs channel)
+- `/enforce-perms` — admin-only permission overwrite enforcement
 
 ## Prereqs
 
@@ -65,3 +74,4 @@ A Discord bot that:
 
 - Clash API requires you to whitelist your public IP in the developer portal.
 - If you run the bot from home and your IP changes, requests will start failing until you update the whitelist.
+- SQLite DB files are local-only and intentionally ignored by git (`bot.sqlite`, `bot.sqlite-wal`, `bot.sqlite-shm`).

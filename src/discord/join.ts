@@ -483,7 +483,7 @@ async function getOrCreateVerificationThread(
 
   const user = await client.users.fetch(userId).catch(() => null);
   const username = user?.username ?? 'Discord Username';
-  const setupThreadName = `Setup Necessary - ${username}`.slice(0, 90);
+  const setupThreadName = `Verification — ${username}`.slice(0, 90);
   const existingLink = getLinkRow(ctx, userId);
   const desiredName = existingLink
     ? `Profile - ${existingLink.player_name ?? username}`.slice(0, 90)
@@ -557,6 +557,7 @@ export async function reconcileVerificationThreadForUser(
   if (existingId) {
     const existing = await textChannel.threads.fetch(existingId).catch(() => null);
     if (existing) {
+      // Only touch the thread if it's actually not usable.
       if (existing.archived) {
         await existing
           .setArchived(false, 'Re-opening verification/profile thread')
@@ -567,10 +568,21 @@ export async function reconcileVerificationThreadForUser(
           .setLocked(false, 'Re-opening verification/profile thread')
           .catch(() => undefined);
       }
-      await existing
-        .setName(`Profile - ${linked.player_name ?? 'Profile'}`.slice(0, 90))
-        .catch(() => undefined);
-      await existing.members.add(userId).catch(() => undefined);
+
+      // Only rename if it's wrong (renames show as "edited").
+      const desiredName = `Profile - ${linked.player_name ?? 'Profile'}`.slice(0, 90);
+      if (existing.name !== desiredName) {
+        await existing.setName(desiredName).catch(() => undefined);
+      }
+
+      // Only re-add the user if they are not currently a member of the thread.
+      const isMember = await existing.members
+        .fetch(userId)
+        .then(() => true)
+        .catch(() => false);
+      if (!isMember) {
+        await existing.members.add(userId).catch(() => undefined);
+      }
       return;
     }
   }
@@ -601,7 +613,7 @@ export const JoinCommand: SlashCommand = {
   async execute(ctx: AppContext, interaction: ChatInputCommandInteraction) {
     const thread = await ensureThread(ctx, interaction);
     await interaction.reply({
-      content: `Created your verification thread: <#${thread.id}>`,
+      content: `I opened your verification thread: <#${thread.id}>\nPaste your player tag there (example: \`#ABC123\`).`,
       ephemeral: true,
     });
   },
@@ -622,8 +634,17 @@ export async function handleVerificationEntryMessage(ctx: AppContext, msg: any) 
   const thread = await getOrCreateVerificationThread(ctx, msg.client, msg.author.id);
 
   await msg.delete().catch(() => undefined);
+  // Throttle hint messages per-user so the verification channel doesn't get noisy.
+  const hintKey = `verify:hint:last:${msg.author.id}`;
+  const lastRaw = dbGetJobState(ctx.db, hintKey);
+  const last = lastRaw ? Number(lastRaw) : 0;
+  if (Number.isFinite(last) && Date.now() - last < 60_000) return;
+  dbSetJobState(ctx.db, hintKey, String(Date.now()));
+
   const hint = await msg.channel
-    .send({ content: `<@${msg.author.id}> please use your thread: <#${thread.id}>` })
+    .send({
+      content: `<@${msg.author.id}> your verification thread is here: <#${thread.id}> (paste your tag like \`#ABC123\`).`,
+    })
     .catch(() => null);
   if (hint) {
     setTimeout(() => {
