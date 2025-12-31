@@ -5,6 +5,7 @@ import { UnlinkCommand } from './discord/unlink.js';
 import { WhoAmICommand } from './discord/whoami.js';
 import { EnforcePermsCommand } from './discord/enforcePerms.js';
 import { WarLogsCommand, WarStatsCommand } from './discord/warstats.js';
+import { StatsCommand } from './discord/stats.js';
 
 const cfg = loadConfig();
 
@@ -12,6 +13,7 @@ const commands = [
   JoinCommand.data,
   UnlinkCommand.data,
   WhoAmICommand.data,
+  StatsCommand.data,
   EnforcePermsCommand.data,
   WarStatsCommand.data,
   WarLogsCommand.data,

@@ -11,6 +11,16 @@ type ParticipantSnapshot = {
   name?: string;
 };
 
+type WarDaySnapshotHistoryEntry = {
+  key: string; // e.g. warDay:<periodEndTime>
+  endRaw: string;
+  endAtIso: string;
+  capturedAtIso: string;
+  periodType?: string;
+  dayIndex?: number;
+  snapshot: Record<string, ParticipantSnapshot>;
+};
+
 const scheduledWarDaySnapshots = new Map<string, NodeJS.Timeout>();
 
 function clampNonNegative(n: number): number {
@@ -137,6 +147,32 @@ function toFiniteInt(v: unknown): number | undefined {
     if (Number.isFinite(n)) return Math.trunc(n);
   }
   return undefined;
+}
+
+function readSnapshotHistory(ctx: AppContext): WarDaySnapshotHistoryEntry[] {
+  const raw = dbGetJobState(ctx.db, 'war:day_snapshot:history');
+  if (!raw) return [];
+  try {
+    const arr = JSON.parse(raw);
+    return Array.isArray(arr) ? (arr as WarDaySnapshotHistoryEntry[]) : [];
+  } catch {
+    return [];
+  }
+}
+
+function writeSnapshotHistory(ctx: AppContext, entries: WarDaySnapshotHistoryEntry[]) {
+  // Keep small and bounded (job_state row size is limited by SQLite page size).
+  const MAX = 50;
+  const trimmed = entries.slice(-MAX);
+  dbSetJobState(ctx.db, 'war:day_snapshot:history', JSON.stringify(trimmed));
+}
+
+function appendSnapshotHistory(ctx: AppContext, entry: WarDaySnapshotHistoryEntry) {
+  const entries = readSnapshotHistory(ctx);
+  // De-dupe by key.
+  const filtered = entries.filter((e) => e?.key !== entry.key);
+  filtered.push(entry);
+  writeSnapshotHistory(ctx, filtered);
 }
 
 // "Regular" river-race battle days are days 1-4 (not prep/training).
@@ -325,6 +361,23 @@ async function postWarDaySnapshotNow(
   }
   dbSetJobState(ctx.db, 'war:day_snapshot:last_snapshot', JSON.stringify(serialized));
   dbSetJobState(ctx.db, snapshotKey, key);
+
+  // Also keep a rolling history for user-facing queries.
+  const payloadDayIndex =
+    toFiniteInt(payload?.periodIndex) ??
+    toFiniteInt(payload?.dayIndex) ??
+    toFiniteInt(payload?.warDay) ??
+    toFiniteInt(payload?.sectionIndex);
+  const periodType = typeof payload?.periodType === 'string' ? payload.periodType : undefined;
+  appendSnapshotHistory(ctx, {
+    key,
+    endRaw: String(endRaw2),
+    endAtIso: endAt.toISOString(),
+    capturedAtIso: new Date().toISOString(),
+    periodType,
+    dayIndex: payloadDayIndex,
+    snapshot: serialized,
+  });
 }
 
 function diffSnapshots(

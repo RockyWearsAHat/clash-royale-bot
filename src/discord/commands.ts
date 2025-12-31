@@ -1,9 +1,14 @@
-import { SlashCommandBuilder, type ChatInputCommandInteraction, type Client } from 'discord.js';
+import type {
+  ChatInputCommandInteraction,
+  Client,
+  SlashCommandBuilder,
+  SlashCommandOptionsOnlyBuilder,
+} from 'discord.js';
 import type { AppContext } from '../types.js';
 import { errorEmbed, safeReply } from './ui.js';
 
 export type SlashCommand = {
-  data: SlashCommandBuilder;
+  data: SlashCommandBuilder | SlashCommandOptionsOnlyBuilder;
   execute: (ctx: AppContext, interaction: ChatInputCommandInteraction) => Promise<void>;
 };
 
