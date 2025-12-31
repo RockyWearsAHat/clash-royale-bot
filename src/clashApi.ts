@@ -9,6 +9,15 @@ export type ClashClanMember = {
 export type ClashPlayer = {
   tag: string;
   name: string;
+  trophies?: number;
+  bestTrophies?: number;
+  expLevel?: number;
+  wins?: number;
+  losses?: number;
+  battleCount?: number;
+  threeCrownWins?: number;
+  donations?: number;
+  donationsReceived?: number;
   clan?: {
     tag: string;
     name: string;

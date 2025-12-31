@@ -17,6 +17,7 @@ import { UnlinkCommand } from './discord/unlink.js';
 import { WhoAmICommand } from './discord/whoami.js';
 import { EnforcePermsCommand } from './discord/enforcePerms.js';
 import { WarLogsCommand, WarStatsCommand } from './discord/warstats.js';
+import { StatsCommand } from './discord/stats.js';
 import { startScheduler } from './jobs/scheduler.js';
 import { enforceChannelPermissions } from './discord/permissions.js';
 
@@ -42,6 +43,7 @@ registerHandlers(client, ctx, [
   JoinCommand,
   UnlinkCommand,
   WhoAmICommand,
+  StatsCommand,
   EnforcePermsCommand,
   WarStatsCommand,
   WarLogsCommand,
