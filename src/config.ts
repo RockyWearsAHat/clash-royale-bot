@@ -25,6 +25,7 @@ const EnvSchema = z.object({
   CHANNEL_VERIFICATION_ID: z.string().min(1),
   CHANNEL_WAR_LOGS_ID: z.string().min(1),
   CHANNEL_ANNOUNCEMENTS_ID: z.string().min(1),
+  CHANNEL_VANQUISHED_ID: z.string().min(1),
 
   ROLE_VANQUISHED_ID: z.string().min(1),
   ROLE_MEMBER_ID: z.string().min(1),
@@ -52,6 +53,10 @@ const EnvSchema = z.object({
     .optional()
     .transform((v) => (v ?? 'true') === 'true'),
 
+  // If set, permissions will be enforced on a schedule (in addition to startup).
+  // Keep this relatively infrequent to reduce Discord API churn.
+  PERMISSIONS_ENFORCE_CRON: z.string().min(1).default('*/1 * * * *'),
+
   HIDE_VERIFICATION_CHANNEL_AFTER_LINK: z
     .enum(['true', 'false'])
     .optional()
@@ -60,6 +65,19 @@ const EnvSchema = z.object({
   // Dev-only helper: if true, recreates all linked users' profile threads at startup
   // so the latest UI revisions are applied.
   DEV_RECREATE_PROFILE_THREADS: z
+    .enum(['true', 'false'])
+    .optional()
+    .transform((v) => (v ?? 'false') === 'true'),
+
+  // One-time helper: attempt to create links by matching guild display names
+  // to Clash Royale names in the clan roster.
+  MIGRATE_NICKNAME_TO_TAG: z
+    .enum(['true', 'false'])
+    .optional()
+    .transform((v) => (v ?? 'false') === 'true'),
+
+  // If true, run the migration even if it was already marked done.
+  MIGRATE_NICKNAME_TO_TAG_FORCE: z
     .enum(['true', 'false'])
     .optional()
     .transform((v) => (v ?? 'false') === 'true'),

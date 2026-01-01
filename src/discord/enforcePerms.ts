@@ -12,7 +12,7 @@ export const EnforcePermsCommand: SlashCommand = {
   data: new SlashCommandBuilder()
     .setName('enforce-perms')
     .setDescription(
-      'Admin-only: enforce channel permission overwrites for general/war-logs/announcements.',
+      'Admin-only: enforce channel permission overwrites for general/war-logs/announcements/verification/vanquished.',
     ),
   async execute(ctx: AppContext, interaction: ChatInputCommandInteraction) {
     const perms = interaction.memberPermissions;

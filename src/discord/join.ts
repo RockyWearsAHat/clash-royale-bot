@@ -1300,15 +1300,19 @@ export async function handleProfileInteraction(ctx: AppContext, interaction: But
     try {
       const member = await guild.members.fetch(userId);
 
-      const roleIds = [
-        ctx.cfg.ROLE_VANQUISHED_ID,
+      const clanRoleIds = [
         ctx.cfg.ROLE_MEMBER_ID,
         ctx.cfg.ROLE_ELDER_ID,
         ctx.cfg.ROLE_COLEADER_ID,
         ctx.cfg.ROLE_LEADER_ID,
       ];
-      const toRemove = roleIds.filter((rid) => member.roles.cache.has(rid));
+      const toRemove = clanRoleIds.filter((rid) => member.roles.cache.has(rid));
       if (toRemove.length) await member.roles.remove(toRemove).catch(() => undefined);
+
+      // Unlinked users should always be vanquished.
+      if (!member.roles.cache.has(ctx.cfg.ROLE_VANQUISHED_ID)) {
+        await member.roles.add(ctx.cfg.ROLE_VANQUISHED_ID).catch(() => undefined);
+      }
 
       const chan = await guild.channels.fetch(ctx.cfg.CHANNEL_VERIFICATION_ID).catch(() => null);
       if (chan && chan.type === ChannelType.GuildText) {
