@@ -1,4 +1,9 @@
-import { EmbedBuilder, SlashCommandBuilder, type ChatInputCommandInteraction } from 'discord.js';
+import {
+  ChannelType,
+  EmbedBuilder,
+  SlashCommandBuilder,
+  type ChatInputCommandInteraction,
+} from 'discord.js';
 import type { SlashCommand } from './commands.js';
 import type { AppContext } from '../types.js';
 import { infoEmbed } from './ui.js';
@@ -109,8 +114,7 @@ export const StatsCommand: SlashCommand = {
   async execute(ctx: AppContext, interaction: ChatInputCommandInteraction) {
     if (!interaction.inGuild()) return;
 
-    const channel = interaction.channel;
-    if (!channel) {
+    if (!interaction.channel) {
       await interaction.reply({
         content: 'This command must be run in a server text channel.',
         ephemeral: true,
@@ -118,8 +122,21 @@ export const StatsCommand: SlashCommand = {
       return;
     }
 
-    const baseChannelId = channel.isThread() ? channel.parentId : channel.id;
-    if (!baseChannelId || baseChannelId !== ctx.cfg.CHANNEL_GENERAL_ID) {
+    const baseChannelId = interaction.channel.isThread()
+      ? interaction.channel.parentId
+      : interaction.channel.type === ChannelType.GuildText
+        ? interaction.channel.id
+        : null;
+
+    if (!baseChannelId) {
+      await interaction.reply({
+        content: 'This command must be run in a server text channel.',
+        ephemeral: true,
+      });
+      return;
+    }
+
+    if (baseChannelId !== ctx.cfg.CHANNEL_GENERAL_ID) {
       await interaction.reply({
         content: `Please run this in <#${ctx.cfg.CHANNEL_GENERAL_ID}>.`,
         ephemeral: true,

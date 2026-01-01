@@ -7,6 +7,9 @@ export async function enforceChannelPermissions(ctx: AppContext, client: Client,
   const meMember = await guild.members.fetchMe();
 
   const general = await guild.channels.fetch(ctx.cfg.CHANNEL_GENERAL_ID).catch(() => null);
+  const verification = await guild.channels
+    .fetch(ctx.cfg.CHANNEL_VERIFICATION_ID)
+    .catch(() => null);
   const warLogs = await guild.channels.fetch(ctx.cfg.CHANNEL_WAR_LOGS_ID).catch(() => null);
   const announcements = await guild.channels
     .fetch(ctx.cfg.CHANNEL_ANNOUNCEMENTS_ID)
@@ -35,12 +38,49 @@ export async function enforceChannelPermissions(ctx: AppContext, client: Client,
 
   if (!general)
     problems.push(`General channel id not found in guild: ${ctx.cfg.CHANNEL_GENERAL_ID}`);
+  if (!verification)
+    problems.push(`Verification channel id not found in guild: ${ctx.cfg.CHANNEL_VERIFICATION_ID}`);
   if (!warLogs)
     problems.push(`War logs channel id not found in guild: ${ctx.cfg.CHANNEL_WAR_LOGS_ID}`);
   if (!announcements)
     problems.push(
       `Announcements channel id not found in guild: ${ctx.cfg.CHANNEL_ANNOUNCEMENTS_ID}`,
     );
+
+  // Verification (who-are-you): keep channel visible so private threads don't "vanish",
+  // but prevent posting in the channel itself.
+  if (verification && verification.type === ChannelType.GuildText) {
+    if (!canView(verification)) problems.push('Verification: bot cannot view channel');
+    if (!canManageOverwrites(verification))
+      problems.push('Verification: bot lacks Manage Channels permission');
+
+    if (canManageOverwrites(verification)) {
+      // Allow clan roles + vanquished to view (needed to access private threads).
+      for (const roleId of [
+        ctx.cfg.ROLE_VANQUISHED_ID,
+        ctx.cfg.ROLE_MEMBER_ID,
+        ctx.cfg.ROLE_ELDER_ID,
+        ctx.cfg.ROLE_COLEADER_ID,
+        ctx.cfg.ROLE_LEADER_ID,
+      ]) {
+        await safeEdit('Verification', verification, roleId, {
+          ViewChannel: true,
+          ReadMessageHistory: true,
+          SendMessages: false,
+          CreatePublicThreads: false,
+          CreatePrivateThreads: false,
+          SendMessagesInThreads: true,
+        });
+      }
+
+      await safeEdit('Verification', verification, meUser.id, {
+        ViewChannel: true,
+        ReadMessageHistory: true,
+        SendMessages: true,
+        ManageMessages: true,
+      });
+    }
+  }
 
   // General: member+ can access, vanquished cannot.
   if (general && general.type === ChannelType.GuildText) {
@@ -63,6 +103,7 @@ export async function enforceChannelPermissions(ctx: AppContext, client: Client,
           ViewChannel: true,
           SendMessages: true,
           ReadMessageHistory: true,
+          UseApplicationCommands: true,
         });
       }
 
@@ -82,11 +123,21 @@ export async function enforceChannelPermissions(ctx: AppContext, client: Client,
       problems.push('War logs: bot lacks Manage Channels permission');
 
     if (canManageOverwrites(warLogs)) {
+      // Hide war logs by default; grant access only to elder+.
+      // Note: @everyone role ID === guild ID.
+      await safeEdit('War logs', warLogs, guild.id, {
+        ViewChannel: false,
+      });
+
       for (const roleId of [ctx.cfg.ROLE_ELDER_ID, ctx.cfg.ROLE_COLEADER_ID]) {
         await safeEdit('War logs', warLogs, roleId, {
           ViewChannel: true,
           ReadMessageHistory: true,
-          SendMessages: false,
+          SendMessages: true,
+          SendMessagesInThreads: false,
+          CreatePublicThreads: false,
+          CreatePrivateThreads: false,
+          UseApplicationCommands: true,
         });
       }
 
@@ -95,6 +146,7 @@ export async function enforceChannelPermissions(ctx: AppContext, client: Client,
         ReadMessageHistory: true,
         SendMessages: true,
         ManageMessages: true,
+        UseApplicationCommands: true,
       });
 
       // Keep vanquished out of war logs.
@@ -107,6 +159,8 @@ export async function enforceChannelPermissions(ctx: AppContext, client: Client,
         ReadMessageHistory: true,
         SendMessages: true,
         ManageMessages: true,
+        SendMessagesInThreads: true,
+        CreatePublicThreads: true,
       });
     }
   }

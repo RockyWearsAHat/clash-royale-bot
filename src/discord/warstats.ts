@@ -345,7 +345,7 @@ function resolveParticipantsForRef(
 export const WarStatsCommand: SlashCommand = {
   data: new SlashCommandBuilder()
     .setName('warstats')
-    .setDescription('Show live clan war stats and participation summary (general/war-logs only).')
+    .setDescription('Show live clan war stats and participation summary (war-logs only).')
     .addStringOption((o) =>
       o
         .setName('day')
@@ -378,12 +378,11 @@ export const WarStatsCommand: SlashCommand = {
       return;
     }
 
-    const allowed =
-      baseChannelId === ctx.cfg.CHANNEL_GENERAL_ID || baseChannelId === ctx.cfg.CHANNEL_WAR_LOGS_ID;
+    const allowed = baseChannelId === ctx.cfg.CHANNEL_WAR_LOGS_ID;
 
     if (!allowed) {
       await interaction.reply({
-        content: `Please run this in <#${ctx.cfg.CHANNEL_GENERAL_ID}> or <#${ctx.cfg.CHANNEL_WAR_LOGS_ID}>.`,
+        content: `Please run this in <#${ctx.cfg.CHANNEL_WAR_LOGS_ID}>.`,
         ephemeral: true,
       });
       return;

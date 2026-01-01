@@ -24,12 +24,18 @@ function buildChannelAllowlistPermissions(
   guildId: string,
   allowedChannelIds: string[],
 ): CommandPermission[] {
-  // Disable everywhere for @everyone, then re-enable only in the allowed channels.
-  // Note: @everyone role ID === guild ID.
-  return [
-    { id: guildId, type: 1, permission: false },
-    ...allowedChannelIds.map((id) => ({ id, type: 3 as const, permission: true })),
-  ];
+  // SAFETY:
+  // If we set @everyone=false here and the channel allowlist doesn't apply correctly,
+  // non-admin users effectively lose the command everywhere (admins/owners still see it).
+  //
+  // To keep per-channel visibility WITHOUT lockouts, we:
+  // - set @everyone=true
+  // - explicitly disable the command in every other channel (type=3, permission=false)
+  // - explicitly enable it in allowed channels
+  //
+  // This is limited by Discord to ~100 permission entries per command.
+  void allowedChannelIds;
+  return [{ id: guildId, type: 1, permission: true }];
 }
 
 function getRedirectUri(): URL {
@@ -215,6 +221,38 @@ async function applyCommandPermissions(
 
   const permsRest = new REST({ version: '10', authPrefix: 'Bearer' }).setToken(bearer);
 
+  const allChannels = (await rest.get(Routes.guildChannels(guildId)).catch(() => [])) as Array<{
+    id: string;
+    type?: number;
+  }>;
+  const allChannelIds = Array.isArray(allChannels)
+    ? allChannels.map((c) => String((c as any)?.id ?? '')).filter((id) => id && id !== guildId)
+    : [];
+
+  const buildGuildWideChannelDenyList = (allowedChannelIds: string[]): CommandPermission[] => {
+    const allowed = new Set(allowedChannelIds);
+    const disallowed = allChannelIds.filter((id) => !allowed.has(id));
+
+    // Discord caps permission entries per command.
+    const MAX_ENTRIES = 100;
+    const total = 1 + disallowed.length + allowedChannelIds.length;
+    if (total > MAX_ENTRIES) {
+      console.log(
+        `Skipping per-channel command visibility: guild has ${allChannelIds.length} channels, which would require ${total} permission entries (> ${MAX_ENTRIES}).`,
+      );
+      return [{ id: guildId, type: 1, permission: true }];
+    }
+
+    return [
+      // Enable for everyone by default.
+      { id: guildId, type: 1, permission: true },
+      // Disable in all other channels.
+      ...disallowed.map((id) => ({ id, type: 3 as const, permission: false })),
+      // Enable in allowed channels.
+      ...allowedChannelIds.map((id) => ({ id, type: 3 as const, permission: true })),
+    ];
+  };
+
   const statsId = commandIdsByName.get('stats');
   const warstatsId = commandIdsByName.get('warstats');
   const warlogsId = commandIdsByName.get('warlogs');
@@ -225,11 +263,8 @@ async function applyCommandPermissions(
     );
   }
 
-  const statsPerms = buildChannelAllowlistPermissions(guildId, [cfg.CHANNEL_GENERAL_ID]);
-  const warPerms = buildChannelAllowlistPermissions(guildId, [
-    cfg.CHANNEL_GENERAL_ID,
-    cfg.CHANNEL_WAR_LOGS_ID,
-  ]);
+  const statsPerms = buildGuildWideChannelDenyList([cfg.CHANNEL_GENERAL_ID]);
+  const warPerms = buildGuildWideChannelDenyList([cfg.CHANNEL_WAR_LOGS_ID]);
 
   const payload = [
     { id: statsId, permissions: statsPerms },
@@ -261,7 +296,9 @@ async function main() {
   console.log(`Registered ${commands.length} command(s) for guild ${guildId}.`);
 }
 
-main().catch((e) => {
-  console.error(e);
-  process.exit(1);
-});
+main()
+  .then(() => process.exit(0))
+  .catch((e) => {
+    console.error(e);
+    process.exit(1);
+  });
