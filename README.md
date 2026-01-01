@@ -1,50 +1,51 @@
 # StupidDiscordBot (Clash Royale)
 
-A Discord bot that:
+[![Node.js](https://img.shields.io/badge/node-%3E%3D20-339933?logo=node.js&logoColor=white)](https://nodejs.org/)
+[![TypeScript](https://img.shields.io/badge/TypeScript-5.x-3178C6?logo=typescript&logoColor=white)](https://www.typescriptlang.org/)
+[![discord.js](https://img.shields.io/badge/discord.js-v14-5865F2?logo=discord&logoColor=white)](https://discord.js.org/)
+[![SQLite](https://img.shields.io/badge/SQLite-better--sqlite3-003B57?logo=sqlite&logoColor=white)](https://www.sqlite.org/)
 
-- Links Discord users to Clash Royale player tags
-- Polls the Clash Royale API for clan membership & roles
-- Keeps Discord roles in sync (member/elder/co-leader/leader)
-- Logs war participation (delta updates + end-of-day snapshots)
-- Provides slash commands for linking and stats
+A production-style Discord bot for a single Clash Royale clan.
+It links Discord users to player tags, syncs roles from the clan roster, and posts war participation logs.
 
-Key commands:
+## Features
 
-- `/join` — link your Discord user to a Clash Royale player tag
-- `/whoami` — show your linked tag
-- `/unlink` — remove your linked tag
-- `/warstats` (alias: `/warlogs`) — show current war stats (restricted to the war-logs channel)
-- `/enforce-perms` — admin-only permission overwrite enforcement
+- Onboarding: `/join` creates a verification thread and links a Discord user → player tag
+- Role sync: periodically assigns **member/elder/co-leader/leader** (or **vanquished**) based on clan roster
+- War monitoring: posts participation deltas + snapshots to a dedicated logs channel
+- Admin utilities: permissions enforcement and unlinking
 
-## Prereqs
+## Tech stack
+
+- Node.js 20+, TypeScript
+- Discord.js v14
+- SQLite via `better-sqlite3`
+- Scheduling via `node-cron`
+- Config via `.env` + zod validation
+
+## Prerequisites
 
 - Node.js 20+
-- A Discord server where you have admin
-- Clash Royale API token (https://developer.clashroyale.com/)
+- Discord server where you have admin
+- Clash Royale API token: https://developer.clashroyale.com/
+  - Requires whitelisting your public IP
 
-## Setup (local)
+## Setup
 
-1. Install deps
+1. Install dependencies
 
 - `npm i`
 
-2. Create `.env`
+2. Configure environment
 
 - Copy `.env.example` to `.env` and fill values.
-  - You must set `CHANNEL_GENERAL_ID` (member+ access), `CHANNEL_WAR_LOGS_ID`, `CHANNEL_ANNOUNCEMENTS_ID`, and `CHANNEL_VERIFICATION_ID`.
+- Required channel IDs include `CHANNEL_GENERAL_ID`, `CHANNEL_WAR_LOGS_ID`, `CHANNEL_ANNOUNCEMENTS_ID`, and `CHANNEL_VERIFICATION_ID`.
 
 3. Create the Discord application + bot
 
 - Discord Developer Portal → New Application
 - Bot → Reset Token → put it in `DISCORD_TOKEN`
 - OAuth2 → URL Generator → scopes: `bot`, `applications.commands`
-- Bot permissions (minimum to start testing):
-  - Manage Roles
-  - Manage Channels (if you want the bot to adjust permissions later)
-  - Read Message History
-  - Send Messages
-  - Create Public Threads
-  - Manage Threads
 - Privileged Gateway Intents:
   - Server Members Intent: ON
   - Message Content Intent: ON (needed for thread-based tag capture)
@@ -53,25 +54,42 @@ Key commands:
 
 - `npm run register:commands`
 
-5. Run the bot
+## Run
 
-- `npm run dev`
+### One-click launchers
 
-## Testing flow
+- Windows (double-click): `run-bot.bat`
+- macOS (double-click): `run-bot.command`
+- Linux (double-click): `run-bot.desktop`
 
-- Run `/join` → bot creates a thread in `CHANNEL_VERIFICATION_ID`
-- Post your player tag (like `#ABC123`) in that thread
-- The bot validates via Clash API, saves the mapping, and archives the thread
-- Role sync runs every minute and will apply/remove roles based on clan data
+Each launcher runs the same flow: install (if needed) → build → start.
 
-## Permissions enforcement
+Optional flags (via environment variables):
 
-- If `PERMISSIONS_ENFORCE_ON_STARTUP=true`, the bot will attempt to apply channel overwrites on startup.
-- Important: the bot must be able to see/edit those channels at least once (give it `View Channel` + `Manage Channels` or `Administrator`), otherwise Discord will reject overwrite edits.
-- Admin-only command: `/enforce-perms` to run the permission enforcement manually and get a detailed report.
+- `SKIP_INSTALL=1` — skip `npm install`
+- `REGISTER_COMMANDS=1` — run `npm run register:commands` before starting
+
+### Terminal
+
+- macOS/Linux: `bash ./run-bot.sh`
+- Any OS with Node: `node ./scripts/run-bot.mjs`
+
+## Commands
+
+- `/join` — link your Discord user to a Clash Royale player tag
+- `/whoami` — show your linked tag
+- `/unlink` — remove your linked tag
+- `/warstats` (alias: `/warlogs`) — show current war stats (restricted to the war-logs channel)
+- `/enforce-perms` — admin-only permission overwrite enforcement
+
+## How it works (high level)
+
+- Persistence: SQLite tables for user links and job state checkpoints
+- Sync loop: scheduled jobs pull clan/war data from the Clash API and apply idempotent updates
+- Source of truth: clan roster determines Discord roles; Discord is corrected automatically
 
 ## Notes
 
-- Clash API requires you to whitelist your public IP in the developer portal.
-- If you run the bot from home and your IP changes, requests will start failing until you update the whitelist.
+- If `PERMISSIONS_ENFORCE_ON_STARTUP=true`, the bot will attempt to apply channel overwrites on startup.
+  - Ensure the bot can see/edit those channels at least once, otherwise Discord will reject overwrite edits.
 - SQLite DB files are local-only and intentionally ignored by git (`bot.sqlite`, `bot.sqlite-wal`, `bot.sqlite-shm`).
