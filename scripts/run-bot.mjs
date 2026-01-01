@@ -36,6 +36,14 @@ function envFlag(name, defaultValue = '0') {
   );
 }
 
+function envFlagOptional(name) {
+  const raw = process.env[name];
+  if (raw == null) return undefined;
+  const trimmed = String(raw).trim();
+  if (!trimmed) return undefined;
+  return trimmed.toLowerCase() === '1' || trimmed.toLowerCase() === 'true';
+}
+
 async function run(command, args) {
   return new Promise((resolve, reject) => {
     const child = spawn(command, args, {
@@ -74,10 +82,19 @@ async function main() {
     fail('Missing .env file. Copy .env.example -> .env and fill in required values.');
   }
 
-  const skipInstall = envFlag('SKIP_INSTALL');
-  // Default to registering commands so "double-click to run" works end-to-end.
-  // Users can opt out with REGISTER_COMMANDS=0 / false.
-  const registerCommands = envFlag('REGISTER_COMMANDS', '1');
+  // One-click bootstrap convenience flag.
+  // - INSTALL_AND_REGISTER=1 (default) => install deps + register commands
+  // - INSTALL_AND_REGISTER=0 => skip install + skip command registration
+  // Advanced overrides:
+  // - If SKIP_INSTALL is set, it overrides INSTALL_AND_REGISTER's install behavior.
+  // - If REGISTER_COMMANDS is set, it overrides INSTALL_AND_REGISTER's register behavior.
+  const installAndRegister = envFlag('INSTALL_AND_REGISTER', '1');
+
+  const skipInstallOverride = envFlagOptional('SKIP_INSTALL');
+  const registerCommandsOverride = envFlagOptional('REGISTER_COMMANDS');
+
+  const skipInstall = skipInstallOverride ?? !installAndRegister;
+  const registerCommands = registerCommandsOverride ?? installAndRegister;
 
   // npm availability check: attempt to run `npm --version`.
   try {

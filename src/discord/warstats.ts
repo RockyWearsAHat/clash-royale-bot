@@ -909,101 +909,12 @@ export const WarStatsCommand: SlashCommand = {
     const dayArg = interaction.options.getString('day');
     const parsed = dayArg ? parseRelativeDayInput(dayArg) : null;
 
-    // Fetch once for rendering + optional debug logs.
+    // Fetch once for rendering.
     const [payload, log, roster] = await Promise.all([
       ctx.clash.getCurrentRiverRace(ctx.cfg.CLASH_CLAN_TAG, { cacheBust: true }),
       ctx.clash.getRiverRaceLog(ctx.cfg.CLASH_CLAN_TAG, { cacheBust: true }),
       ctx.clash.getClanMembers(ctx.cfg.CLASH_CLAN_TAG).catch(() => []),
     ]);
-
-    // Preserve existing debug logging behavior (only for the slash command path).
-    if (ctx.cfg.WARLOGS_DEBUG) {
-      try {
-        const participants = parsed
-          ? resolveParticipantsForRef(ctx, parsed, extractParticipants(payload)).participants
-          : extractParticipants(payload);
-
-        const debugTargets = ctx.cfg.WARLOGS_DEBUG_PLAYERS.split(',')
-          .map((s) => s.trim())
-          .filter(Boolean);
-
-        const periodType = typeof payload?.periodType === 'string' ? payload.periodType : undefined;
-        const idx =
-          (typeof payload?.periodIndex !== 'undefined' ? payload.periodIndex : undefined) ??
-          (typeof payload?.dayIndex !== 'undefined' ? payload.dayIndex : undefined) ??
-          (typeof payload?.warDay !== 'undefined' ? payload.warDay : undefined) ??
-          (typeof payload?.sectionIndex !== 'undefined' ? payload.sectionIndex : undefined);
-
-        const rawParticipants: any[] = Array.isArray(payload?.clan?.participants)
-          ? payload.clan.participants
-          : [];
-        const sampleTags = rawParticipants
-          .slice(0, 10)
-          .map((p) => normalizeTagUpper(p?.tag ?? p?.playerTag ?? p?.memberTag) ?? '(missing tag)');
-
-        console.log(
-          '[warlogs debug] periodType=%s idx=%s participants=%d sampleTags=%j',
-          periodType ?? '(unknown)',
-          idx ?? '(unknown)',
-          rawParticipants.length,
-          sampleTags,
-        );
-
-        if (debugTargets.length) {
-          const rosterByName = new Map<string, { tag: string; name: string }>();
-          for (const m of roster) {
-            const t = normalizeTagUpper(m.tag);
-            if (!t) continue;
-            rosterByName.set(normalizeName(m.name), { tag: t, name: m.name });
-          }
-
-          for (const targetName of debugTargets) {
-            const rosterHit = rosterByName.get(normalizeName(targetName));
-            if (!rosterHit) {
-              console.log('[warlogs debug] roster lookup failed for name=%j', targetName);
-              continue;
-            }
-
-            const raw = findRawParticipantByTag(payload, rosterHit.tag);
-            const snap = participants?.get(rosterHit.tag);
-            const decks = snap?.decksUsed ?? 0;
-            const fame = snap?.fame ?? 0;
-            const repairs = snap?.repairs ?? 0;
-            const boatAttacks = snap?.boatAttacks ?? 0;
-            const wouldBeNoBattles = decks <= 0 && fame <= 0 && repairs <= 0 && boatAttacks <= 0;
-            console.log(
-              '[warlogs debug] player=%s tag=%s inParticipantsMap=%s decks=%s fame=%s repairs=%s rawKeys=%j',
-              rosterHit.name,
-              rosterHit.tag,
-              String(Boolean(snap)),
-              String(snap?.decksUsed ?? '(none)'),
-              String(snap?.fame ?? '(none)'),
-              String(snap?.repairs ?? '(none)'),
-              raw ? Object.keys(raw) : '(no raw participant entry)',
-            );
-            console.log(
-              '[warlogs debug] computed wouldBeNoBattles=%s (decks=%s fame=%s repairs=%s boatAttacks=%s)',
-              String(wouldBeNoBattles),
-              String(decks),
-              String(fame),
-              String(repairs),
-              String(boatAttacks),
-            );
-            if (raw) {
-              console.log(
-                '[warlogs debug] raw decksUsed=%s decksUsedToday=%s decksUsedThisDay=%s',
-                String(raw?.decksUsed ?? '(missing)'),
-                String(raw?.decksUsedToday ?? '(missing)'),
-                String(raw?.decksUsedThisDay ?? '(missing)'),
-              );
-              console.log('[warlogs debug] rawParticipant=%j', raw);
-            }
-          }
-        }
-      } catch {
-        // ignore
-      }
-    }
 
     const render = renderWarStatsEmbedsFromData(ctx, {
       parsed,

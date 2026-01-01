@@ -51,7 +51,12 @@ That’s it. The launcher will install dependencies (if needed), build the bot, 
 
 Each launcher runs the same flow: install (if needed) → build → register commands → start.
 
-Optional flags (via environment variables, reccomended to turn ON the first run [SKIP_INSTALL=0, REGISTER_COMMANDS=1, default ON in .env.example], then subsequently turn off as to not depreciate dependancies & give extra work to the discord API after initial registration):
+Optional flags (via environment variables) for one-click launchers:
+
+- `INSTALL_AND_REGISTER=1` (default) — install deps + register commands
+- `INSTALL_AND_REGISTER=0` — skip install + skip command registration
+
+Advanced overrides (only set these if you need to override `INSTALL_AND_REGISTER`):
 
 - `SKIP_INSTALL=1` — skip `npm install`
 - `REGISTER_COMMANDS=0` — skip command registration

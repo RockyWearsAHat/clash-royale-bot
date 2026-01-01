@@ -46,24 +46,9 @@ const EnvSchema = z
     WAR_POLL_CRON: z.string().min(1).default('*/1 * * * *'),
     EMPTY_SPOT_CRON: z.string().min(1).default('*/5 * * * *'),
 
-    WARLOGS_DEBUG: z
-      .enum(['true', 'false'])
-      .optional()
-      .transform((v) => (v ?? 'false') === 'true'),
-    // Comma-separated roster names to debug in /warlogs (e.g. "Natedawg, Alice").
-    WARLOGS_DEBUG_PLAYERS: z
-      .string()
-      .optional()
-      .transform((v) => v ?? ''),
-
     // If set, permissions will be enforced on a schedule (in addition to startup).
     // Keep this relatively infrequent to reduce Discord API churn.
     PERMISSIONS_ENFORCE_CRON: z.string().min(1).default('*/1 * * * *'),
-
-    HIDE_VERIFICATION_CHANNEL_AFTER_LINK: z
-      .enum(['true', 'false'])
-      .optional()
-      .transform((v) => (v ?? 'true') === 'true'),
 
     // Dev-only helper: if true, recreates all linked users' profile threads at startup
     // so the latest UI revisions are applied.

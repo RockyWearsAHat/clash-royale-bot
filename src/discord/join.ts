@@ -707,7 +707,6 @@ async function tryApplyNicknamePreference(
     );
 
     await member.setNickname(desiredNickname);
-    await denyVerificationChannel(ctx, guild, userId);
     return null;
   } catch (e) {
     const anyErr = e as any;
@@ -718,29 +717,6 @@ async function tryApplyNicknamePreference(
     const suffix = code || status ? ` (code: ${code ?? 'n/a'}, status: ${status ?? 'n/a'})` : '';
     return `Nickname update failed (${msg})${suffix}. This is usually role hierarchy or missing permissions.`;
   }
-}
-
-async function denyVerificationChannel(ctx: AppContext, guild: any, userId: string) {
-  if (!ctx.cfg.HIDE_VERIFICATION_CHANNEL_AFTER_LINK) return;
-  const chan = await guild.channels.fetch(ctx.cfg.CHANNEL_VERIFICATION_ID).catch(() => null);
-  if (!chan || chan.type !== ChannelType.GuildText) return;
-
-  // IMPORTANT:
-  // Denying ViewChannel makes private threads under this channel inaccessible
-  // to regular users (owners/admins can still see them), which looks like the
-  // profile thread "vanished".
-  //
-  // Instead, keep the channel visible but prevent posting in it; the user should
-  // only interact inside their private profile thread.
-  await chan.permissionOverwrites
-    .edit(userId, {
-      ViewChannel: true,
-      SendMessages: false,
-      CreatePublicThreads: false,
-      CreatePrivateThreads: false,
-      SendMessagesInThreads: true,
-    })
-    .catch(() => undefined);
 }
 
 async function getOrCreateVerificationThread(
@@ -1116,14 +1092,6 @@ export async function reconcileVerificationThreadForUser(
         await getOrCreateVerificationThread(ctx, client, userId);
         return;
       }
-
-      // Ensure the parent-channel overwrite doesn't accidentally hide the thread.
-      try {
-        const guild = await client.guilds.fetch(ctx.cfg.GUILD_ID);
-        await denyVerificationChannel(ctx, guild, userId);
-      } catch {
-        // ignore
-      }
       return;
     }
   }
@@ -1293,12 +1261,6 @@ export async function handleVerificationThreadMessage(ctx: AppContext, msg: any)
 
   // Optional: lock the parent "who-are-you" channel for the user.
   // We keep it viewable so their private profile thread doesn't become inaccessible.
-  try {
-    const guild = await msg.client.guilds.fetch(ctx.cfg.GUILD_ID);
-    await denyVerificationChannel(ctx, guild, msg.author.id);
-  } catch {
-    // ignore
-  }
 }
 
 export async function handleLinkPreferenceInteraction(
