@@ -149,7 +149,7 @@ client.once('ready', async () => {
     // ignore
   }
 
-  // Create threads for all currently-unlinked members so they don't need to type /join.
+  // Create threads for all currently-unlinked members (no manual command required).
   // Runs once at startup; safe to re-run due to job_state reuse.
   (async () => {
     try {

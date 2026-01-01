@@ -63,7 +63,7 @@ export async function syncRolesOnce(ctx: AppContext, guild: Guild) {
 
     const desired = desiredKeyFromClanRole(clanMember?.role);
     const current = desiredKeyFromClanRole(currentClanRoleKey(ctx, discordMember));
-    const hasVanquished = discordMember.roles.cache.has(ctx.cfg.ROLE_VANQUISHED_ID);
+    const hasVanquished = discordMember.roles.cache.has(ctx.cfg.ROLE_NON_MEMBER_ID);
     const currentVanquished = hasVanquished && current === 'vanquished';
     const desiredVanquished = desired === 'vanquished';
 
@@ -129,7 +129,7 @@ async function applyMemberRoles(
   const clanRoleIds = allClanRoleIds(ctx);
 
   const desiredClanRoleId = clanRole ? roleIdForClanRole(ctx, clanRole) : null;
-  const hasVanquished = member.roles.cache.has(ctx.cfg.ROLE_VANQUISHED_ID);
+  const hasVanquished = member.roles.cache.has(ctx.cfg.ROLE_NON_MEMBER_ID);
   const shouldBeVanquished = !clanRole;
 
   // Remove any clan roles that aren't the desired one.
@@ -143,11 +143,11 @@ async function applyMemberRoles(
   // Ensure vanquished is correct.
   if (shouldBeVanquished) {
     if (!hasVanquished) {
-      await member.roles.add(ctx.cfg.ROLE_VANQUISHED_ID).catch(() => undefined);
+      await member.roles.add(ctx.cfg.ROLE_NON_MEMBER_ID).catch(() => undefined);
     }
   } else {
     if (hasVanquished) {
-      await member.roles.remove(ctx.cfg.ROLE_VANQUISHED_ID).catch(() => undefined);
+      await member.roles.remove(ctx.cfg.ROLE_NON_MEMBER_ID).catch(() => undefined);
     }
   }
 

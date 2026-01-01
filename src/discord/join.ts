@@ -1191,26 +1191,6 @@ export async function recreateProfileThreadForUser(
   await getOrCreateVerificationThread(ctx, client, userId);
 }
 
-async function ensureThread(
-  ctx: AppContext,
-  interaction: ChatInputCommandInteraction,
-): Promise<ThreadChannel> {
-  return await getOrCreateVerificationThread(ctx, interaction.client, interaction.user.id);
-}
-
-export const JoinCommand: SlashCommand = {
-  data: new SlashCommandBuilder()
-    .setName('join')
-    .setDescription('Start linking your Discord to your Clash Royale player tag via a thread.'),
-  async execute(ctx: AppContext, interaction: ChatInputCommandInteraction) {
-    const thread = await ensureThread(ctx, interaction);
-    await interaction.reply({
-      content: `I opened your verification thread: <#${thread.id}>\nPaste your player tag there (example: \`#ABC123\`).`,
-      ephemeral: true,
-    });
-  },
-};
-
 // If an unlinked user speaks in the verification channel, create their thread automatically.
 export async function handleVerificationEntryMessage(ctx: AppContext, msg: any) {
   if (!msg.guild) return;
@@ -1603,8 +1583,8 @@ export async function handleProfileInteraction(ctx: AppContext, interaction: But
       if (toRemove.length) await member.roles.remove(toRemove).catch(() => undefined);
 
       // Unlinked users should always be vanquished.
-      if (!member.roles.cache.has(ctx.cfg.ROLE_VANQUISHED_ID)) {
-        await member.roles.add(ctx.cfg.ROLE_VANQUISHED_ID).catch(() => undefined);
+      if (!member.roles.cache.has(ctx.cfg.ROLE_NON_MEMBER_ID)) {
+        await member.roles.add(ctx.cfg.ROLE_NON_MEMBER_ID).catch(() => undefined);
       }
 
       const chan = await guild.channels.fetch(ctx.cfg.CHANNEL_VERIFICATION_ID).catch(() => null);
