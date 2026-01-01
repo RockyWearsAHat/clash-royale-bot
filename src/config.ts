@@ -5,7 +5,6 @@ const EnvSchema = z
   .object({
     DISCORD_TOKEN: z.string().min(1),
     DISCORD_APP_ID: z.string().min(1),
-    DISCORD_GUILD_ID: z.string().min(1).optional(),
 
     // Optional: OAuth2 Bearer token used to update application command permissions
     // (channel-level enable/disable so slash command suggestions match availability).

@@ -290,7 +290,7 @@ async function applyCommandPermissions(
 }
 
 async function main() {
-  const guildId = cfg.DISCORD_GUILD_ID ?? cfg.GUILD_ID;
+  const guildId = cfg.GUILD_ID;
 
   await rest.put(Routes.applicationGuildCommands(cfg.DISCORD_APP_ID, guildId), {
     body: commands,
