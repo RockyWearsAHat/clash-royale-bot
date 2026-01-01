@@ -2,14 +2,19 @@ import { REST, Routes } from 'discord.js';
 import { loadConfig } from './config.js';
 import { WarLogsCommand, WarStatsCommand } from './discord/warstats.js';
 import { StatsCommand } from './discord/stats.js';
+import { NotifyNoMoreCommand, NotifyWhenSpotCommand } from './discord/spotNotify.js';
 import http from 'node:http';
 import { randomBytes } from 'node:crypto';
 
 const cfg = loadConfig();
 
-const commands = [StatsCommand.data, WarStatsCommand.data, WarLogsCommand.data].map((c) =>
-  c.toJSON(),
-);
+const commands = [
+  StatsCommand.data,
+  WarStatsCommand.data,
+  WarLogsCommand.data,
+  NotifyWhenSpotCommand.data,
+  NotifyNoMoreCommand.data,
+].map((c) => c.toJSON());
 
 const rest = new REST({ version: '10' }).setToken(cfg.DISCORD_TOKEN);
 
@@ -256,20 +261,25 @@ async function applyCommandPermissions(
   const statsId = commandIdsByName.get('stats');
   const warstatsId = commandIdsByName.get('warstats');
   const warlogsId = commandIdsByName.get('warlogs');
+  const notifyWhenSpotId = commandIdsByName.get('notifywhenspot');
+  const notifyNoMoreId = commandIdsByName.get('notifynomore');
 
-  if (!statsId || !warstatsId || !warlogsId) {
+  if (!statsId || !warstatsId || !warlogsId || !notifyWhenSpotId || !notifyNoMoreId) {
     throw new Error(
-      `Could not resolve all command IDs. Found: stats=${statsId}, warstats=${warstatsId}, warlogs=${warlogsId}`,
+      `Could not resolve all command IDs. Found: stats=${statsId}, warstats=${warstatsId}, warlogs=${warlogsId}, notifywhenspot=${notifyWhenSpotId}, notifynomore=${notifyNoMoreId}`,
     );
   }
 
   const statsPerms = buildGuildWideChannelDenyList([cfg.CHANNEL_GENERAL_ID]);
   const warPerms = buildGuildWideChannelDenyList([cfg.CHANNEL_WAR_LOGS_ID]);
+  const vanquishedPerms = buildGuildWideChannelDenyList([cfg.CHANNEL_VANQUISHED_ID]);
 
   const payload = [
     { id: statsId, permissions: statsPerms },
     { id: warstatsId, permissions: warPerms },
     { id: warlogsId, permissions: warPerms },
+    { id: notifyWhenSpotId, permissions: vanquishedPerms },
+    { id: notifyNoMoreId, permissions: vanquishedPerms },
   ];
 
   // Batch endpoint is disabled; apply per-command.

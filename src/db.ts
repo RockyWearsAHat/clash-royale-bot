@@ -21,6 +21,12 @@ export function migrate(db: Db) {
       updated_at TEXT NOT NULL DEFAULT (datetime('now'))
     );
 
+    CREATE TABLE IF NOT EXISTS spot_subscriptions (
+      discord_user_id TEXT PRIMARY KEY,
+      created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+
     CREATE TABLE IF NOT EXISTS war_history (
       war_key TEXT PRIMARY KEY,
       clan_tag TEXT NOT NULL,
@@ -51,6 +57,15 @@ export function migrate(db: Db) {
     BEGIN
       UPDATE user_links SET updated_at = datetime('now') WHERE discord_user_id = OLD.discord_user_id;
     END;
+
+    CREATE TRIGGER IF NOT EXISTS trg_spot_subscriptions_updated
+    AFTER UPDATE ON spot_subscriptions
+    FOR EACH ROW
+    BEGIN
+      UPDATE spot_subscriptions
+      SET updated_at = datetime('now')
+      WHERE discord_user_id = OLD.discord_user_id;
+    END;
   `);
 
   // Best-effort migration for older DBs that predate new columns.
@@ -70,6 +85,35 @@ export function migrate(db: Db) {
       `ALTER TABLE user_links ADD COLUMN display_preference TEXT NOT NULL DEFAULT 'discord';`,
     );
   }
+}
+
+export function dbSubscribeToSpots(db: Db, discordUserId: string): { alreadySubscribed: boolean } {
+  const existing = db
+    .prepare('SELECT 1 FROM spot_subscriptions WHERE discord_user_id = ?')
+    .get(discordUserId) as { 1: number } | undefined;
+  if (existing) return { alreadySubscribed: true };
+
+  db.prepare(
+    `INSERT INTO spot_subscriptions(discord_user_id)
+     VALUES(?)
+     ON CONFLICT(discord_user_id) DO NOTHING`,
+  ).run(discordUserId);
+
+  return { alreadySubscribed: false };
+}
+
+export function dbListSpotSubscribers(db: Db): string[] {
+  const rows = db
+    .prepare('SELECT discord_user_id FROM spot_subscriptions ORDER BY updated_at DESC')
+    .all() as Array<{ discord_user_id: string }>;
+  return rows.map((r) => r.discord_user_id);
+}
+
+export function dbUnsubscribeFromSpots(db: Db, discordUserId: string): { wasSubscribed: boolean } {
+  const info = db
+    .prepare('DELETE FROM spot_subscriptions WHERE discord_user_id = ?')
+    .run(discordUserId);
+  return { wasSubscribed: info.changes > 0 };
 }
 
 export function dbGetJobState(db: Db, key: string): string | undefined {

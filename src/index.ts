@@ -16,9 +16,11 @@ import {
   recreateProfileThreadForUser,
   refreshProfileThreadMainMenuMessage,
   refreshOpenNicknameMenuIfAny,
+  repairVerificationThreadsOnce,
 } from './discord/join.js';
 import { WarLogsCommand, WarStatsCommand } from './discord/warstats.js';
 import { StatsCommand } from './discord/stats.js';
+import { NotifyNoMoreCommand, NotifyWhenSpotCommand } from './discord/spotNotify.js';
 import { startScheduler } from './jobs/scheduler.js';
 import { enforceChannelPermissions } from './discord/permissions.js';
 import { syncRolesOnce, enforceUnlinkedMemberVanquished } from './discord/roleSync.js';
@@ -44,7 +46,13 @@ const client = new Client({
   partials: [Partials.Channel],
 });
 
-registerHandlers(client, ctx, [StatsCommand, WarStatsCommand, WarLogsCommand]);
+registerHandlers(client, ctx, [
+  StatsCommand,
+  WarStatsCommand,
+  WarLogsCommand,
+  NotifyWhenSpotCommand,
+  NotifyNoMoreCommand,
+]);
 
 client.on('guildMemberAdd', async (member) => {
   try {
@@ -122,14 +130,13 @@ client.once('ready', async () => {
     guild = null;
   }
 
-  if (cfg.PERMISSIONS_ENFORCE_ON_STARTUP) {
-    try {
-      if (guild) await enforceChannelPermissions(ctx, client, guild);
-      console.log('Channel permission overwrites enforced.');
-    } catch (e) {
-      const msg = e instanceof Error ? e.message : String(e);
-      console.warn('Failed to enforce channel permissions:', msg);
-    }
+  // Always enforce channel permissions on startup so operators don't need to run a manual command.
+  try {
+    if (guild) await enforceChannelPermissions(ctx, client, guild);
+    console.log('Channel permission overwrites enforced.');
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    console.warn('Failed to enforce channel permissions:', msg);
   }
 
   // Keep roles aligned immediately on startup (not just on the first cron tick).
@@ -168,6 +175,14 @@ client.once('ready', async () => {
         await new Promise((r) => setTimeout(r, 250));
       }
 
+      // Validation/repair pass: clean up duplicates and ensure members can access their canonical thread.
+      // No recreations are performed here.
+      try {
+        await repairVerificationThreadsOnce(ctx, client);
+      } catch {
+        // ignore
+      }
+
       // Ensure unlinked users get vanquished + a verification thread.
       // Uses REST pagination (avoids gateway opcode 8) and checkpoints progress.
       const scanDoneKey = 'startup:unlinked_scan:done';
@@ -195,6 +210,13 @@ client.once('ready', async () => {
 
         dbSetJobState(ctx.db, scanDoneKey, 'true');
         dbDeleteJobState(ctx.db, scanAfterKey);
+      }
+
+      // Final cleanup: the unlinked scan can create new threads; delete any bot-only or unusable ones.
+      try {
+        await repairVerificationThreadsOnce(ctx, client);
+      } catch {
+        // ignore
       }
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);

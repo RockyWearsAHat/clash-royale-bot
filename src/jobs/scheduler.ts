@@ -6,6 +6,7 @@ import { reconcileVerificationThreadForUser } from '../discord/join.js';
 import { enforceChannelPermissions } from '../discord/permissions.js';
 import { pollWarOnce } from './war.js';
 import { dbGetJobState, dbSetJobState } from '../db.js';
+import { pollEmptySpotsOnce } from './emptySpots.js';
 
 export function startScheduler(ctx: AppContext, client: Client) {
   cron.schedule(ctx.cfg.PERMISSIONS_ENFORCE_CRON, async () => {
@@ -56,6 +57,17 @@ export function startScheduler(ctx: AppContext, client: Client) {
       ctx.db
         .prepare('INSERT INTO audit_log(type, message) VALUES(?, ?)')
         .run('war_poll_error', msg);
+    }
+  });
+
+  cron.schedule(ctx.cfg.EMPTY_SPOT_CRON, async () => {
+    try {
+      await pollEmptySpotsOnce(ctx, client);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      ctx.db
+        .prepare('INSERT INTO audit_log(type, message) VALUES(?, ?)')
+        .run('empty_spot_error', msg);
     }
   });
 }
