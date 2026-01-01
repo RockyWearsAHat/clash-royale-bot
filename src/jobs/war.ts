@@ -337,6 +337,19 @@ async function postWarDaySnapshotNow(
   const header = `War day snapshot (ending ${endAt.toLocaleString()}):`;
   const chunks = chunkEmbedDescriptions([`**${header}**`, ...lines]);
 
+  // Snapshots go into a thread to keep #war-logs readable.
+  const starter = await channel.send({ content: header }).catch(() => null);
+  const thread = starter
+    ? await starter
+        .startThread({
+          name: `War day summary — ${endAt.toLocaleDateString()}`,
+          autoArchiveDuration: 1440,
+          reason: 'War day snapshot thread',
+        })
+        .catch(() => null)
+    : null;
+  const target: any = thread ?? channel;
+
   const noBattlesText = noBattles.length
     ? noBattles.length > 40
       ? `${noBattles.slice(0, 40).join(', ')} … (+${noBattles.length - 40} more)`
@@ -350,7 +363,7 @@ async function postWarDaySnapshotNow(
       .setFooter({ text: ts.toLocaleString() });
     if (i === 0) embed.addFields({ name: 'No battles', value: noBattlesText });
     if (chunks.length > 1) embed.setAuthor({ name: `Part ${i + 1} of ${chunks.length}` });
-    await channel.send({ embeds: [embed] }).catch(() => undefined);
+    await target.send({ embeds: [embed] }).catch(() => undefined);
   }
 
   // Persist baseline for next day and dedupe key.
