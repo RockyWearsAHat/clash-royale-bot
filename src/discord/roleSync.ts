@@ -1,7 +1,7 @@
 import type { Guild, GuildMember } from 'discord.js';
 import type { AppContext } from '../types.js';
 import type { ClashClanMemberRole } from '../clashApi.js';
-import { dbGetJobState, dbSetJobState } from '../db.js';
+import { dbGetJobState, dbSetJobState, dbUnsubscribeFromSpots } from '../db.js';
 
 function roleIdForClanRole(ctx: AppContext, role: ClashClanMemberRole): string {
   switch (role) {
@@ -54,6 +54,12 @@ export async function syncRolesOnce(ctx: AppContext, guild: Guild) {
     if (!discordMember) continue;
 
     const clanMember = clanByTag.get(link.player_tag.toUpperCase());
+
+    // If they are a clan member again, clear any lingering spot-notification subscription.
+    // (They shouldn't be using that channel anymore, but keep the DB state clean anyway.)
+    if (clanMember) {
+      dbUnsubscribeFromSpots(ctx.db, link.discord_user_id);
+    }
 
     const desired = desiredKeyFromClanRole(clanMember?.role);
     const current = desiredKeyFromClanRole(currentClanRoleKey(ctx, discordMember));
