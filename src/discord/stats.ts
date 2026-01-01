@@ -44,7 +44,7 @@ async function resolveTargetTag(
       return {
         errorEmbed: infoEmbed(
           'Not linked yet',
-          'Use `/join` to link your Clash Royale player tag.',
+          'Your Discord account is not linked to a Clash Royale player tag.',
         ),
       };
     }
@@ -107,6 +107,26 @@ export const StatsCommand: SlashCommand = {
     ),
 
   async execute(ctx: AppContext, interaction: ChatInputCommandInteraction) {
+    if (!interaction.inGuild()) return;
+
+    const channel = interaction.channel;
+    if (!channel) {
+      await interaction.reply({
+        content: 'This command must be run in a server text channel.',
+        ephemeral: true,
+      });
+      return;
+    }
+
+    const baseChannelId = channel.isThread() ? channel.parentId : channel.id;
+    if (!baseChannelId || baseChannelId !== ctx.cfg.CHANNEL_GENERAL_ID) {
+      await interaction.reply({
+        content: `Please run this in <#${ctx.cfg.CHANNEL_GENERAL_ID}>.`,
+        ephemeral: true,
+      });
+      return;
+    }
+
     await interaction.deferReply({ ephemeral: true });
 
     const resolved = await resolveTargetTag(ctx, interaction);
