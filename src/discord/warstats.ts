@@ -345,7 +345,7 @@ function resolveParticipantsForRef(
 export const WarStatsCommand: SlashCommand = {
   data: new SlashCommandBuilder()
     .setName('warstats')
-    .setDescription('Show live clan war stats and participation summary (war-logs only).')
+    .setDescription('Show live clan war stats and participation summary (general/war-logs only).')
     .addStringOption((o) =>
       o
         .setName('day')
@@ -356,7 +356,7 @@ export const WarStatsCommand: SlashCommand = {
   async execute(ctx: AppContext, interaction: ChatInputCommandInteraction) {
     if (!interaction.inGuild()) return;
 
-    if (!interaction.channel || interaction.channel.type !== ChannelType.GuildText) {
+    if (!interaction.channel) {
       await interaction.reply({
         content: 'This command must be run in a server text channel.',
         ephemeral: true,
@@ -364,9 +364,26 @@ export const WarStatsCommand: SlashCommand = {
       return;
     }
 
-    if (interaction.channel.id !== ctx.cfg.CHANNEL_WAR_LOGS_ID) {
+    const baseChannelId = interaction.channel.isThread()
+      ? interaction.channel.parentId
+      : interaction.channel.type === ChannelType.GuildText
+        ? interaction.channel.id
+        : null;
+
+    if (!baseChannelId) {
       await interaction.reply({
-        content: `Please run this in <#${ctx.cfg.CHANNEL_WAR_LOGS_ID}>.`,
+        content: 'This command must be run in a server text channel.',
+        ephemeral: true,
+      });
+      return;
+    }
+
+    const allowed =
+      baseChannelId === ctx.cfg.CHANNEL_GENERAL_ID || baseChannelId === ctx.cfg.CHANNEL_WAR_LOGS_ID;
+
+    if (!allowed) {
+      await interaction.reply({
+        content: `Please run this in <#${ctx.cfg.CHANNEL_GENERAL_ID}> or <#${ctx.cfg.CHANNEL_WAR_LOGS_ID}>.`,
         ephemeral: true,
       });
       return;

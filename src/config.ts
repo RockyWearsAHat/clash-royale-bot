@@ -6,6 +6,17 @@ const EnvSchema = z.object({
   DISCORD_APP_ID: z.string().min(1),
   DISCORD_GUILD_ID: z.string().min(1).optional(),
 
+  // Optional: OAuth2 Bearer token used to update application command permissions
+  // (channel-level enable/disable so slash command suggestions match availability).
+  // Note: Discord requires a Bearer token with the `applications.commands.permissions.update` scope.
+  DISCORD_COMMAND_PERMISSIONS_BEARER_TOKEN: z.string().min(1).optional(),
+
+  // Optional: if set, `npm run register:commands` can run an interactive OAuth2 flow
+  // to obtain a short-lived Bearer token for applying command permissions.
+  // You must add the redirect URI to your Discord application settings.
+  DISCORD_OAUTH_CLIENT_SECRET: z.string().min(1).optional(),
+  DISCORD_OAUTH_REDIRECT_URI: z.string().min(1).optional(),
+
   CLASH_API_TOKEN: z.string().min(1),
   CLASH_CLAN_TAG: z.string().min(2),
 
@@ -45,6 +56,13 @@ const EnvSchema = z.object({
     .enum(['true', 'false'])
     .optional()
     .transform((v) => (v ?? 'true') === 'true'),
+
+  // Dev-only helper: if true, recreates all linked users' profile threads at startup
+  // so the latest UI revisions are applied.
+  DEV_RECREATE_PROFILE_THREADS: z
+    .enum(['true', 'false'])
+    .optional()
+    .transform((v) => (v ?? 'false') === 'true'),
 });
 
 export type AppConfig = z.infer<typeof EnvSchema>;

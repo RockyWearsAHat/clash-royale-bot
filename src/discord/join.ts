@@ -8,6 +8,7 @@ import {
   SlashCommandBuilder,
   TextInputBuilder,
   TextInputStyle,
+  WebhookClient,
   type ButtonInteraction,
   type ChatInputCommandInteraction,
   type ModalSubmitInteraction,
@@ -126,13 +127,53 @@ function makePreferenceButtons(
 }
 
 function makeProfileButtons(userId: string) {
-  // Thread should be static; open the dynamic UI in an ephemeral menu.
+  // Legacy (kept for older stored messages that might still exist).
   return new ActionRowBuilder<ButtonBuilder>().addComponents(
     new ButtonBuilder()
-      .setCustomId(`menu:${userId}:open`)
-      .setStyle(ButtonStyle.Primary)
-      .setLabel('Open Menu'),
+      .setCustomId(`menu:${userId}:settings`)
+      .setStyle(ButtonStyle.Secondary)
+      .setLabel('Settings'),
   );
+}
+
+function makeMainProfileButtons(userId: string, currentNickname: string) {
+  const nick = truncateButtonLabel(String(currentNickname ?? '').trim() || 'Unknown');
+  const changeLabel = truncateButtonLabel(`Change Nickname (Currently: ${nick})`);
+
+  return new ActionRowBuilder<ButtonBuilder>().addComponents(
+    new ButtonBuilder()
+      .setCustomId(`menu:${userId}:nickname`)
+      .setStyle(ButtonStyle.Primary)
+      .setLabel(changeLabel),
+    new ButtonBuilder()
+      .setCustomId(`menu:${userId}:settings`)
+      .setStyle(ButtonStyle.Secondary)
+      .setLabel('Settings'),
+  );
+}
+
+function isLegacyOpenMenuMessage(userId: string, msg: any): boolean {
+  try {
+    const rows = Array.isArray(msg?.components) ? msg.components : [];
+    for (const row of rows) {
+      const comps = Array.isArray(row?.components) ? row.components : [];
+      for (const c of comps) {
+        const customId = String(c?.customId ?? '');
+        const label = String(c?.label ?? '');
+        if (customId === `menu:${userId}:open`) return true;
+        if (label.toLowerCase().includes('open menu')) return true;
+      }
+    }
+
+    const embeds = Array.isArray(msg?.embeds) ? msg.embeds : [];
+    for (const e of embeds) {
+      const desc = String((e as any)?.description ?? '');
+      if (desc.toLowerCase().includes('open menu')) return true;
+    }
+  } catch {
+    // ignore
+  }
+  return false;
 }
 
 function makeDangerZoneButton(userId: string) {
@@ -157,16 +198,21 @@ function makeUnlinkConfirmButtons(userId: string) {
   );
 }
 
-function makeMenuFooterButtons(userId: string) {
+function makeCloseButton(userId: string) {
   return new ActionRowBuilder<ButtonBuilder>().addComponents(
-    new ButtonBuilder()
-      .setCustomId(`menu:${userId}:refresh`)
-      .setStyle(ButtonStyle.Secondary)
-      .setLabel('Refresh'),
     new ButtonBuilder()
       .setCustomId(`menu:${userId}:close`)
       .setStyle(ButtonStyle.Secondary)
       .setLabel('Close'),
+  );
+}
+
+function makeSettingsButtons(userId: string) {
+  return new ActionRowBuilder<ButtonBuilder>().addComponents(
+    new ButtonBuilder()
+      .setCustomId(`menu:${userId}:change_tag`)
+      .setStyle(ButtonStyle.Primary)
+      .setLabel('Change Linked Tag'),
     new ButtonBuilder()
       .setCustomId(`menu:${userId}:unlink`)
       .setStyle(ButtonStyle.Danger)
@@ -174,7 +220,7 @@ function makeMenuFooterButtons(userId: string) {
   );
 }
 
-async function buildEphemeralMenu(ctx: AppContext, guild: any, userId: string) {
+async function buildNicknameMenu(ctx: AppContext, guild: any, userId: string) {
   const row = getLinkRow(ctx, userId);
   if (!row) {
     const embed = new EmbedBuilder()
@@ -184,7 +230,8 @@ async function buildEphemeralMenu(ctx: AppContext, guild: any, userId: string) {
   }
 
   const member = await guild.members.fetch(userId).catch(() => null);
-  const discordName = member ? getPreferredBaseName(member) : 'Discord';
+  const discordBaseName = member ? getPreferredBaseName(member) : 'Discord';
+  const currentDisplayName = member ? getCurrentGuildDisplayName(member) : discordBaseName;
 
   // Live data from Clash API (name, clan membership, role).
   const player = await ctx.clash.getPlayer(row.player_tag).catch(() => null);
@@ -204,16 +251,65 @@ async function buildEphemeralMenu(ctx: AppContext, guild: any, userId: string) {
     inline: false,
   });
 
-  const preferenceRow = makePreferenceButtons(userId, row.display_preference, {
-    discord: discordName,
-    discordWithClash: `${discordName} (${liveName})`,
+  const effective = determineEffectiveDisplayPreference({
+    currentDisplayName,
+    discordBaseName,
+    clashName: liveName,
+    savedCustomName: row.custom_display_name,
+  });
+
+  const preferenceRow = makePreferenceButtons(userId, effective.pref, {
+    discord: discordBaseName,
+    discordWithClash: `${discordBaseName} (${liveName})`,
     clash: liveName,
-    custom: row.custom_display_name || undefined,
+    // If the user's current name isn't a default, show it like it was typed via "Other".
+    custom: effective.pref === 'custom' ? effective.customLabel : undefined,
   });
 
   return {
     embeds: [embed],
-    components: [preferenceRow, makeMenuFooterButtons(userId)],
+    components: [preferenceRow, makeCloseButton(userId)],
+  };
+}
+
+async function buildSettingsMenu(ctx: AppContext, guild: any, userId: string) {
+  const row = getLinkRow(ctx, userId);
+  const embed = new EmbedBuilder().setTitle('Settings');
+
+  if (!row) {
+    embed.setDescription('Not linked. Paste your player tag in your thread.');
+    return { embeds: [embed], components: [makeCloseButton(userId)] as any[] };
+  }
+
+  // Best-effort live lookup for display.
+  const player = await ctx.clash.getPlayer(row.player_tag).catch(() => null);
+  const liveName = player?.name ?? row.player_name ?? 'Unknown';
+  const liveTag = player?.tag ?? row.player_tag;
+
+  embed.setDescription(`Currently linked to **${liveName} (${liveTag})**.`);
+
+  return {
+    embeds: [embed],
+    components: [makeSettingsButtons(userId), makeCloseButton(userId)],
+  };
+}
+
+async function buildMainMenuEphemeral(ctx: AppContext, guild: any, userId: string) {
+  const row = getLinkRow(ctx, userId);
+  const embed = new EmbedBuilder().setTitle('Profile');
+
+  if (!row) {
+    embed.setDescription('Not linked. Paste your player tag in your thread.');
+    return { embeds: [embed], components: [makeCloseButton(userId)] as any[] };
+  }
+
+  const member = await guild.members.fetch(userId).catch(() => null);
+  const currentNick = getCurrentGuildDisplayName(member);
+  embed.setDescription(`Linked to **${row.player_tag}**. Choose an option.`);
+
+  return {
+    embeds: [embed],
+    components: [makeMainProfileButtons(userId, currentNick), makeCloseButton(userId)],
   };
 }
 
@@ -302,17 +398,13 @@ async function closeOtherThreadsForUser(
     // Fall back to name matching for old formats.
     if (!isMember && !legacyNameMatchesUser(t.name ?? '')) continue;
 
-    // Prefer deleting duplicates entirely. If Discord refuses, fall back to archive/lock.
-    try {
-      await t.delete('Deleting duplicate verification/profile thread');
-    } catch {
-      await t
-        .setLocked(true, 'Closing duplicate verification/profile thread')
-        .catch(() => undefined);
-      await t
-        .setArchived(true, 'Closing duplicate verification/profile thread')
-        .catch(() => undefined);
-    }
+    // Duplicates can happen due to old versions or manual actions.
+    // Do NOT delete by default (it can feel like threads "randomly disappear").
+    // Instead, archive+lock so history remains and the canonical thread stays stable.
+    await t.setLocked(true, 'Closing duplicate verification/profile thread').catch(() => undefined);
+    await t
+      .setArchived(true, 'Closing duplicate verification/profile thread')
+      .catch(() => undefined);
   }
 
   // Also clear any stale state pointing at something else.
@@ -353,17 +445,28 @@ async function renderOrUpdateProfileMessage(
       'Step 1: Paste your Clash Royale player tag in this thread (example: `#ABC123`).',
     );
   } else {
-    embed.setDescription(
-      `Linked to ${row.player_tag}. Use **Open Menu** to view live status and change your display name.`,
-    );
+    embed.setDescription(`Linked to ${row.player_tag}. Choose an option below.`);
   }
 
-  const components = row ? [makeProfileButtons(userId)] : [];
+  let components: any[] = [];
+  if (row) {
+    const member = await thread.guild.members.fetch(userId).catch(() => null);
+    const currentNick = getCurrentGuildDisplayName(member);
+    components = [makeMainProfileButtons(userId, currentNick)];
+  }
 
   // Only create if missing; avoid updating this message so it never shows “edited”.
   if (uiId) {
     const exists = await thread.messages.fetch(uiId).catch(() => null);
-    if (exists) return;
+    if (exists) {
+      // Upgrade legacy Open Menu messages in-place once.
+      if (row && isLegacyOpenMenuMessage(userId, exists)) {
+        await exists
+          .edit({ content: '', embeds: [embed], components } as any)
+          .catch(() => undefined);
+      }
+      return;
+    }
   }
 
   // Delete any stale pointer and create a fresh UI message.
@@ -376,9 +479,132 @@ async function renderOrUpdateProfileMessage(
   if (sent) dbSetJobState(ctx.db, uiKey, sent.id);
 }
 
+export async function refreshProfileThreadMainMenuMessage(
+  ctx: AppContext,
+  guild: any,
+  userId: string,
+) {
+  const row = getLinkRow(ctx, userId);
+  if (!row) return;
+
+  const parent = await guild.channels.fetch(ctx.cfg.CHANNEL_VERIFICATION_ID).catch(() => null);
+  if (!parent || parent.type !== ChannelType.GuildText) return;
+  const textChannel = parent as TextChannel;
+
+  const threadId = dbGetJobState(ctx.db, `verify:thread:${userId}`);
+  if (!threadId) return;
+  const thread = await textChannel.threads.fetch(threadId).catch(() => null);
+  if (!thread) return;
+
+  const uiId = dbGetJobState(ctx.db, `profile:uiMessage:${userId}`);
+  if (!uiId) return;
+  const msg = await thread.messages.fetch(uiId).catch(() => null);
+  if (!msg) return;
+
+  const member = await guild.members.fetch(userId).catch(() => null);
+  const currentNick = getCurrentGuildDisplayName(member);
+
+  const embed = new EmbedBuilder().setTitle('Profile');
+  embed.setDescription(`Linked to ${row.player_tag}. Choose an option below.`);
+
+  await msg
+    .edit({
+      content: '',
+      embeds: [embed],
+      components: [makeMainProfileButtons(userId, currentNick)],
+    } as any)
+    .catch(() => undefined);
+}
+
 function getPreferredBaseName(member: any): string {
   // Prefer global display name if available; otherwise fallback to username.
   return String(member?.user?.globalName ?? member?.user?.username ?? 'Discord');
+}
+
+function getCurrentGuildDisplayName(member: any): string {
+  // In discord.js, displayName matches what the guild shows (nickname if set; else globalName/username).
+  return String(
+    member?.displayName ??
+      member?.nickname ??
+      member?.user?.globalName ??
+      member?.user?.username ??
+      'Discord',
+  );
+}
+
+function determineEffectiveDisplayPreference(args: {
+  currentDisplayName: string;
+  discordBaseName: string;
+  clashName: string;
+  savedCustomName?: string | null;
+}): { pref: DisplayPreference; customLabel?: string } {
+  const cur = String(args.currentDisplayName ?? '').trim();
+  const discord = String(args.discordBaseName ?? '').trim();
+  const clash = String(args.clashName ?? '').trim();
+  const discordWithClash = `${discord} (${clash})`;
+  const savedCustom = String(args.savedCustomName ?? '').trim();
+
+  if (cur && cur === discord) return { pref: 'discord' };
+  if (cur && cur === clash) return { pref: 'clash' };
+  if (cur && cur === discordWithClash) return { pref: 'discord_with_clash' };
+  if (cur && savedCustom && cur === savedCustom)
+    return { pref: 'custom', customLabel: savedCustom };
+
+  // Not a default: show as if the user chose Other and typed it.
+  if (cur) return { pref: 'custom', customLabel: cur };
+
+  // Fallback.
+  if (savedCustom) return { pref: 'custom', customLabel: savedCustom };
+  return { pref: 'discord' };
+}
+
+type OpenNicknameMenuState = {
+  appId: string;
+  token: string;
+  messageId: string;
+  openedAt: number;
+};
+
+function nicknameMenuStateKey(userId: string) {
+  return `profile:nickMenu:${userId}`;
+}
+
+export async function refreshOpenNicknameMenuIfAny(ctx: AppContext, guild: any, userId: string) {
+  const raw = dbGetJobState(ctx.db, nicknameMenuStateKey(userId));
+  if (!raw) return;
+
+  let state: OpenNicknameMenuState | null = null;
+  try {
+    state = JSON.parse(raw) as OpenNicknameMenuState;
+  } catch {
+    dbDeleteJobState(ctx.db, nicknameMenuStateKey(userId));
+    return;
+  }
+
+  const openedAt = Number(state?.openedAt ?? 0);
+  // Interaction tokens are short-lived; be conservative.
+  if (!Number.isFinite(openedAt) || Date.now() - openedAt > 14 * 60_000) {
+    dbDeleteJobState(ctx.db, nicknameMenuStateKey(userId));
+    return;
+  }
+
+  const appId = String(state?.appId ?? '').trim();
+  const token = String(state?.token ?? '').trim();
+  const messageId = String(state?.messageId ?? '').trim();
+  if (!appId || !token || !messageId) {
+    dbDeleteJobState(ctx.db, nicknameMenuStateKey(userId));
+    return;
+  }
+
+  const menu = await buildNicknameMenu(ctx, guild, userId);
+
+  try {
+    const webhook = new WebhookClient({ id: appId, token });
+    await webhook.editMessage(messageId, menu as any).catch(() => undefined);
+  } catch {
+    // If the ephemeral message no longer exists or token expired, clear state.
+    dbDeleteJobState(ctx.db, nicknameMenuStateKey(userId));
+  }
 }
 
 function computeNicknameForPreference(
@@ -465,8 +691,22 @@ async function denyVerificationChannel(ctx: AppContext, guild: any, userId: stri
   if (!ctx.cfg.HIDE_VERIFICATION_CHANNEL_AFTER_LINK) return;
   const chan = await guild.channels.fetch(ctx.cfg.CHANNEL_VERIFICATION_ID).catch(() => null);
   if (!chan || chan.type !== ChannelType.GuildText) return;
+
+  // IMPORTANT:
+  // Denying ViewChannel makes private threads under this channel inaccessible
+  // to regular users (owners/admins can still see them), which looks like the
+  // profile thread "vanished".
+  //
+  // Instead, keep the channel visible but prevent posting in it; the user should
+  // only interact inside their private profile thread.
   await chan.permissionOverwrites
-    .edit(userId, { ViewChannel: false, SendMessages: false })
+    .edit(userId, {
+      ViewChannel: true,
+      SendMessages: false,
+      CreatePublicThreads: false,
+      CreatePrivateThreads: false,
+      SendMessagesInThreads: true,
+    })
     .catch(() => undefined);
 }
 
@@ -583,6 +823,14 @@ export async function reconcileVerificationThreadForUser(
       if (!isMember) {
         await existing.members.add(userId).catch(() => undefined);
       }
+
+      // Ensure the parent-channel overwrite doesn't accidentally hide the thread.
+      try {
+        const guild = await client.guilds.fetch(ctx.cfg.GUILD_ID);
+        await denyVerificationChannel(ctx, guild, userId);
+      } catch {
+        // ignore
+      }
       return;
     }
   }
@@ -597,6 +845,57 @@ export async function ensureVerificationThreadForUser(
   userId: string,
 ): Promise<ThreadChannel> {
   return await getOrCreateVerificationThread(ctx, client, userId);
+}
+
+export async function recreateProfileThreadForUser(
+  ctx: AppContext,
+  client: any,
+  userId: string,
+): Promise<void> {
+  const linked = getLinkRow(ctx, userId);
+  if (!linked) return;
+
+  const channel = await client.channels.fetch(ctx.cfg.CHANNEL_VERIFICATION_ID).catch(() => null);
+  if (!channel || channel.type !== ChannelType.GuildText) return;
+  const textChannel = channel as TextChannel;
+
+  const stateKey = `verify:thread:${userId}`;
+  const existingId = dbGetJobState(ctx.db, stateKey);
+
+  if (existingId) {
+    const existing = await textChannel.threads.fetch(existingId).catch(() => null);
+    if (existing) {
+      try {
+        await existing.delete('DEV_RECREATE_PROFILE_THREADS: recreating profile thread');
+      } catch {
+        // If delete is disallowed (common in some guild setups), archive/lock it so the new one is clean.
+        await existing
+          .setLocked(true, 'DEV_RECREATE_PROFILE_THREADS: locking old profile thread')
+          .catch(() => undefined);
+        await existing
+          .setArchived(true, 'DEV_RECREATE_PROFILE_THREADS: archiving old profile thread')
+          .catch(() => undefined);
+
+        // Best-effort: remove the static UI message pointer so the new thread gets a fresh UI.
+        const uiKey = `profile:uiMessage:${userId}`;
+        const uiId = dbGetJobState(ctx.db, uiKey);
+        if (uiId) {
+          await deleteMessageIfExists(existing, uiId);
+          dbDeleteJobState(ctx.db, uiKey);
+        }
+      }
+    }
+  }
+
+  // Always clear pointers so a fresh thread is created.
+  dbDeleteJobState(ctx.db, stateKey);
+  dbDeleteJobState(ctx.db, `profile:uiMessage:${userId}`);
+  dbDeleteJobState(ctx.db, `profile:infoMessage:${userId}`);
+  dbDeleteJobState(ctx.db, `profile:controlsMessage:${userId}`);
+  dbDeleteJobState(ctx.db, `profile:infoHash:${userId}`);
+  dbDeleteJobState(ctx.db, `profile:controlsHash:${userId}`);
+
+  await getOrCreateVerificationThread(ctx, client, userId);
 }
 
 async function ensureThread(
@@ -719,7 +1018,8 @@ export async function handleVerificationThreadMessage(ctx: AppContext, msg: any)
   const uiId = dbGetJobState(ctx.db, `profile:uiMessage:${msg.author.id}`) ?? '';
   await cleanupThreadMessagesKeep(thread, [uiId]);
 
-  // Optional: hide the parent "who-are-you" channel from the user.
+  // Optional: lock the parent "who-are-you" channel for the user.
+  // We keep it viewable so their private profile thread doesn't become inaccessible.
   try {
     const guild = await msg.client.guilds.fetch(ctx.cfg.GUILD_ID);
     await denyVerificationChannel(ctx, guild, msg.author.id);
@@ -759,13 +1059,16 @@ export async function handleLinkPreferenceInteraction(
       .prepare('SELECT custom_display_name FROM user_links WHERE discord_user_id = ?')
       .get(userId) as { custom_display_name?: string } | undefined;
 
+    const member = await interaction.guild?.members.fetch(userId).catch(() => null);
+    const suggested = getCurrentGuildDisplayName(member);
+
     const input = new TextInputBuilder()
       .setCustomId('custom_display_name')
       .setLabel('Custom server nickname')
       .setStyle(TextInputStyle.Short)
       .setRequired(true)
       .setMaxLength(32)
-      .setValue((existing?.custom_display_name ?? '').slice(0, 32));
+      .setValue(String(existing?.custom_display_name ?? suggested ?? '').slice(0, 32));
 
     modal.addComponents(new ActionRowBuilder<TextInputBuilder>().addComponents(input));
     await interaction.showModal(modal);
@@ -792,12 +1095,16 @@ export async function handleLinkPreferenceInteraction(
         .setCustomId(`linkprefmodal:${userId}`)
         .setTitle('Set custom name');
 
+      const member = await interaction.guild?.members.fetch(userId).catch(() => null);
+      const suggested = getCurrentGuildDisplayName(member);
+
       const input = new TextInputBuilder()
         .setCustomId('custom_display_name')
         .setLabel('Custom server nickname')
         .setStyle(TextInputStyle.Short)
         .setRequired(true)
-        .setMaxLength(32);
+        .setMaxLength(32)
+        .setValue(String(suggested ?? '').slice(0, 32));
 
       modal.addComponents(new ActionRowBuilder<TextInputBuilder>().addComponents(input));
       await interaction.showModal(modal);
@@ -813,11 +1120,19 @@ export async function handleLinkPreferenceInteraction(
   // Update the ephemeral menu in-place (no thread edits, no “edited” tag).
   try {
     const guild = await interaction.client.guilds.fetch(ctx.cfg.GUILD_ID);
-    const menu = await buildEphemeralMenu(ctx, guild, userId);
+    const menu = await buildNicknameMenu(ctx, guild, userId);
     await interaction.update(menu as any).catch(async () => {
       // If we can't update (e.g., legacy buttons in thread), fall back to an ephemeral reply.
       await interaction.reply({ ephemeral: true, ...(menu as any) }).catch(() => undefined);
     });
+
+    // Update the main profile thread buttons once the nickname update succeeds.
+    void nicknamePromise
+      .then((err) => {
+        if (err) return;
+        return refreshProfileThreadMainMenuMessage(ctx, guild, userId);
+      })
+      .catch(() => undefined);
   } catch {
     await interaction.deferUpdate().catch(() => undefined);
   }
@@ -855,14 +1170,16 @@ export async function handleLinkPreferenceModalSubmit(
     )
     .run('custom', custom, userId);
 
-  await tryApplyNicknamePreference(ctx, interaction, userId, 'custom', {
+  const nicknameErr = await tryApplyNicknamePreference(ctx, interaction, userId, 'custom', {
     customDisplayName: custom,
   });
 
   try {
     const guild = await interaction.client.guilds.fetch(ctx.cfg.GUILD_ID);
-    const menu = await buildEphemeralMenu(ctx, guild, userId);
+    const menu = await buildNicknameMenu(ctx, guild, userId);
     await interaction.editReply(menu as any).catch(() => undefined);
+
+    await refreshProfileThreadMainMenuMessage(ctx, guild, userId);
   } catch {
     await interaction.deleteReply().catch(() => undefined);
   }
@@ -882,15 +1199,42 @@ export async function handleProfileInteraction(ctx: AppContext, interaction: But
 
   const guild = await interaction.client.guilds.fetch(ctx.cfg.GUILD_ID);
 
+  // Legacy support: old thread buttons might still have customId menu:<id>:open
   if (action === 'open') {
-    const menu = await buildEphemeralMenu(ctx, guild, userId);
+    const menu = await buildMainMenuEphemeral(ctx, guild, userId);
     await interaction.reply({ ephemeral: true, ...(menu as any) }).catch(() => undefined);
     return;
   }
 
-  if (action === 'refresh') {
-    const menu = await buildEphemeralMenu(ctx, guild, userId);
-    await interaction.update(menu as any).catch(() => undefined);
+  if (action === 'nickname') {
+    const menu = await buildNicknameMenu(ctx, guild, userId);
+    await interaction.reply({ ephemeral: true, ...(menu as any) }).catch(() => undefined);
+
+    // Remember this ephemeral menu so we can refresh its selected state if the user's
+    // display name changes while the menu is open.
+    try {
+      const appId = String((interaction as any).applicationId ?? '');
+      const token = String((interaction as any).token ?? '');
+      const reply = await interaction.fetchReply().catch(() => null);
+      const messageId = String((reply as any)?.id ?? '').trim();
+      if (appId && token && messageId) {
+        const state = {
+          appId,
+          token,
+          messageId,
+          openedAt: Date.now(),
+        };
+        dbSetJobState(ctx.db, nicknameMenuStateKey(userId), JSON.stringify(state));
+      }
+    } catch {
+      // ignore
+    }
+    return;
+  }
+
+  if (action === 'settings') {
+    const menu = await buildSettingsMenu(ctx, guild, userId);
+    await interaction.reply({ ephemeral: true, ...(menu as any) }).catch(() => undefined);
     return;
   }
 
@@ -898,6 +1242,9 @@ export async function handleProfileInteraction(ctx: AppContext, interaction: But
     await interaction.deferUpdate().catch(() => undefined);
     // For ephemeral interaction responses, deleteReply removes the menu for the user.
     await interaction.deleteReply().catch(() => undefined);
+
+    // Best-effort: clear any stored menu state.
+    dbDeleteJobState(ctx.db, nicknameMenuStateKey(userId));
     return;
   }
 
@@ -914,8 +1261,31 @@ export async function handleProfileInteraction(ctx: AppContext, interaction: But
   }
 
   if (action === 'unlink_cancel') {
-    const menu = await buildEphemeralMenu(ctx, guild, userId);
+    const menu = await buildSettingsMenu(ctx, guild, userId);
     await interaction.update(menu as any).catch(() => undefined);
+    return;
+  }
+
+  if (action === 'change_tag') {
+    const existing = ctx.db
+      .prepare('SELECT player_tag FROM user_links WHERE discord_user_id = ?')
+      .get(userId) as { player_tag?: string } | undefined;
+
+    const modal = new ModalBuilder()
+      .setCustomId(`changetagmodal:${userId}`)
+      .setTitle('Change linked tag');
+
+    const input = new TextInputBuilder()
+      .setCustomId('player_tag')
+      .setLabel('New Clash Royale player tag')
+      .setStyle(TextInputStyle.Short)
+      .setRequired(true)
+      .setMaxLength(16)
+      .setValue(String(existing?.player_tag ?? '').slice(0, 16));
+
+    modal.addComponents(new ActionRowBuilder<TextInputBuilder>().addComponents(input));
+
+    await interaction.showModal(modal).catch(() => undefined);
     return;
   }
 
@@ -924,6 +1294,7 @@ export async function handleProfileInteraction(ctx: AppContext, interaction: But
 
     ctx.db.prepare('DELETE FROM user_links WHERE discord_user_id = ?').run(userId);
     dbDeleteJobState(ctx.db, `profile:uiMessage:${userId}`);
+    dbDeleteJobState(ctx.db, nicknameMenuStateKey(userId));
 
     // Best-effort: remove bot-managed roles and restore verification channel access.
     try {
@@ -965,4 +1336,87 @@ export async function handleProfileInteraction(ctx: AppContext, interaction: But
 
     await interaction.editReply({ content: '', embeds: [], components: [] }).catch(() => undefined);
   }
+}
+
+export async function handleChangeTagModalSubmit(
+  ctx: AppContext,
+  interaction: ModalSubmitInteraction,
+) {
+  if (!interaction.inGuild()) return;
+  if (!interaction.customId.startsWith('changetagmodal:')) return;
+
+  const [, userId] = interaction.customId.split(':');
+  if (!userId) return;
+  if (interaction.user.id !== userId) {
+    await interaction.reply({ content: 'This modal is not for you.', ephemeral: true });
+    return;
+  }
+
+  const raw = interaction.fields.getTextInputValue('player_tag');
+  let tag: string;
+  try {
+    tag = normalizeTag(String(raw ?? ''));
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : 'Invalid tag.';
+    await interaction.reply({ content: msg, ephemeral: true }).catch(() => undefined);
+    return;
+  }
+
+  await interaction.deferReply({ ephemeral: true }).catch(() => undefined);
+
+  const player = await ctx.clash.getPlayer(tag).catch(() => null);
+  if (!player?.tag) {
+    await interaction
+      .editReply({ content: 'Could not validate that tag. Please try again.' })
+      .catch(() => undefined);
+    return;
+  }
+
+  try {
+    ctx.db
+      .prepare('UPDATE user_links SET player_tag = ?, player_name = ? WHERE discord_user_id = ?')
+      .run(player.tag, player.name, userId);
+  } catch (e: any) {
+    const msg = String(e?.message ?? e ?? 'Failed to update link.');
+    if (msg.toLowerCase().includes('unique') || msg.toLowerCase().includes('constraint')) {
+      await interaction.editReply({
+        content:
+          'That player tag is already linked to another Discord user. If that is you, unlink it first.',
+      });
+      return;
+    }
+    await interaction
+      .editReply({ content: 'Failed to update your linked tag. Please try again.' })
+      .catch(() => undefined);
+    return;
+  }
+
+  // Update the thread name + static UI message (best-effort).
+  try {
+    const channel = await interaction.client.channels
+      .fetch(ctx.cfg.CHANNEL_VERIFICATION_ID)
+      .catch(() => null);
+    if (channel && channel.type === ChannelType.GuildText) {
+      const threadId = dbGetJobState(ctx.db, `verify:thread:${userId}`);
+      if (threadId) {
+        const thread = await (channel as TextChannel).threads.fetch(threadId).catch(() => null);
+        if (thread) {
+          await thread.setName(`Profile - ${player.name}`.slice(0, 90)).catch(() => undefined);
+
+          const priorUiId = dbGetJobState(ctx.db, `profile:uiMessage:${userId}`);
+          if (priorUiId) {
+            await deleteMessageIfExists(thread, priorUiId);
+            dbDeleteJobState(ctx.db, `profile:uiMessage:${userId}`);
+          }
+          await renderOrUpdateProfileMessage(ctx, thread, userId);
+        }
+      }
+    }
+  } catch {
+    // ignore
+  }
+
+  await interaction
+    .editReply({ content: `Updated your linked tag to **${player.tag}**.` })
+    .catch(() => undefined);
 }

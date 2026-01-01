@@ -5,17 +5,17 @@ import { ClashApi } from './clashApi.js';
 import type { AppContext } from './types.js';
 import { registerHandlers } from './discord/commands.js';
 import {
-  JoinCommand,
   handleLinkPreferenceInteraction,
   handleLinkPreferenceModalSubmit,
+  handleChangeTagModalSubmit,
   handleProfileInteraction,
   handleVerificationEntryMessage,
   handleVerificationThreadMessage,
   ensureVerificationThreadForUser,
+  recreateProfileThreadForUser,
+  refreshProfileThreadMainMenuMessage,
+  refreshOpenNicknameMenuIfAny,
 } from './discord/join.js';
-import { UnlinkCommand } from './discord/unlink.js';
-import { WhoAmICommand } from './discord/whoami.js';
-import { EnforcePermsCommand } from './discord/enforcePerms.js';
 import { WarLogsCommand, WarStatsCommand } from './discord/warstats.js';
 import { StatsCommand } from './discord/stats.js';
 import { startScheduler } from './jobs/scheduler.js';
@@ -39,15 +39,7 @@ const client = new Client({
   partials: [Partials.Channel],
 });
 
-registerHandlers(client, ctx, [
-  JoinCommand,
-  UnlinkCommand,
-  WhoAmICommand,
-  StatsCommand,
-  EnforcePermsCommand,
-  WarStatsCommand,
-  WarLogsCommand,
-]);
+registerHandlers(client, ctx, [StatsCommand, WarStatsCommand, WarLogsCommand]);
 
 client.on('guildMemberAdd', async (member) => {
   try {
@@ -60,6 +52,28 @@ client.on('guildMemberAdd', async (member) => {
     if (linked) return;
 
     await ensureVerificationThreadForUser(ctx, client, member.id);
+  } catch {
+    // ignore
+  }
+});
+
+client.on('guildMemberUpdate', async (oldMember, newMember) => {
+  try {
+    if (newMember.guild.id !== cfg.GUILD_ID) return;
+    if (newMember.user.bot) return;
+
+    // Only act on display name changes (nickname/global display changes).
+    const before = String((oldMember as any)?.displayName ?? '');
+    const after = String((newMember as any)?.displayName ?? '');
+    if (before === after) return;
+
+    const linked = ctx.db
+      .prepare('SELECT 1 FROM user_links WHERE discord_user_id = ?')
+      .get(newMember.id) as { 1: number } | undefined;
+    if (!linked) return;
+
+    await refreshProfileThreadMainMenuMessage(ctx, newMember.guild, newMember.id);
+    await refreshOpenNicknameMenuIfAny(ctx, newMember.guild, newMember.id);
   } catch {
     // ignore
   }
@@ -83,6 +97,7 @@ client.on('interactionCreate', async (interaction) => {
 
     if (interaction.isModalSubmit()) {
       await handleLinkPreferenceModalSubmit(ctx, interaction);
+      await handleChangeTagModalSubmit(ctx, interaction);
     }
   } catch {
     // ignore
@@ -118,7 +133,11 @@ client.once('ready', async () => {
       // First, ensure linked users have an up-to-date profile thread.
       // This re-renders the state-machine UI on every boot.
       for (const row of linkedRows) {
-        await ensureVerificationThreadForUser(ctx, client, row.discord_user_id);
+        if (cfg.DEV_RECREATE_PROFILE_THREADS) {
+          await recreateProfileThreadForUser(ctx, client, row.discord_user_id);
+        } else {
+          await ensureVerificationThreadForUser(ctx, client, row.discord_user_id);
+        }
         await new Promise((r) => setTimeout(r, 250));
       }
 
