@@ -27,9 +27,9 @@ async function enforceVanquishedChannel(
     return false;
   }
 
-  if (baseChannelId !== ctx.cfg.CHANNEL_VANQUISHED_ID) {
+  if (baseChannelId !== ctx.cfg.CHANNEL_NON_MEMBER_ID) {
     await interaction.reply({
-      content: `Please run this in <#${ctx.cfg.CHANNEL_VANQUISHED_ID}>.`,
+      content: `Please run this in <#${ctx.cfg.CHANNEL_NON_MEMBER_ID}>.`,
       ephemeral: true,
     });
     return false;

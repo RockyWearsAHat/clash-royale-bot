@@ -17,7 +17,7 @@ export async function enforceChannelPermissions(ctx: AppContext, client: Client,
   const announcements = await guild.channels
     .fetch(ctx.cfg.CHANNEL_ANNOUNCEMENTS_ID)
     .catch(() => null);
-  const vanquished = await guild.channels.fetch(ctx.cfg.CHANNEL_VANQUISHED_ID).catch(() => null);
+  const nonMember = await guild.channels.fetch(ctx.cfg.CHANNEL_NON_MEMBER_ID).catch(() => null);
 
   const problems: string[] = [];
 
@@ -50,8 +50,8 @@ export async function enforceChannelPermissions(ctx: AppContext, client: Client,
     problems.push(
       `Announcements channel id not found in guild: ${ctx.cfg.CHANNEL_ANNOUNCEMENTS_ID}`,
     );
-  if (!vanquished)
-    problems.push(`Vanquished channel id not found in guild: ${ctx.cfg.CHANNEL_VANQUISHED_ID}`);
+  if (!nonMember)
+    problems.push(`Non-member channel id not found in guild: ${ctx.cfg.CHANNEL_NON_MEMBER_ID}`);
 
   // Verification (who-are-you): keep channel visible so private threads don't "vanish",
   // but prevent posting in the channel itself.
@@ -73,7 +73,7 @@ export async function enforceChannelPermissions(ctx: AppContext, client: Client,
 
       // Allow clan roles + vanquished to view (needed to access private threads).
       for (const roleId of [
-        ctx.cfg.ROLE_VANQUISHED_ID,
+        ctx.cfg.ROLE_NON_MEMBER_ID,
         ctx.cfg.ROLE_MEMBER_ID,
         ctx.cfg.ROLE_ELDER_ID,
         ctx.cfg.ROLE_COLEADER_ID,
@@ -114,7 +114,7 @@ export async function enforceChannelPermissions(ctx: AppContext, client: Client,
         ViewChannel: false,
       });
 
-      await safeEdit('General', general, ctx.cfg.ROLE_VANQUISHED_ID, {
+      await safeEdit('General', general, ctx.cfg.ROLE_NON_MEMBER_ID, {
         ViewChannel: false,
       });
 
@@ -174,7 +174,7 @@ export async function enforceChannelPermissions(ctx: AppContext, client: Client,
       });
 
       // Keep vanquished out of war logs.
-      await safeEdit('War logs', warLogs, ctx.cfg.ROLE_VANQUISHED_ID, {
+      await safeEdit('War logs', warLogs, ctx.cfg.ROLE_NON_MEMBER_ID, {
         ViewChannel: false,
       });
 
@@ -210,16 +210,16 @@ export async function enforceChannelPermissions(ctx: AppContext, client: Client,
     }
   }
 
-  // Vanquished: unlinked users can view; clan roles cannot.
+  // Non-member: unlinked users can view; clan roles cannot.
   // Note: true Discord admins bypass overwrites and will still be able to view.
-  if (vanquished && vanquished.type === ChannelType.GuildText) {
-    if (!canView(vanquished)) problems.push('Vanquished: bot cannot view channel');
-    if (!canManageOverwrites(vanquished))
-      problems.push('Vanquished: bot lacks Manage Channels permission');
+  if (nonMember && nonMember.type === ChannelType.GuildText) {
+    if (!canView(nonMember)) problems.push('Non-member: bot cannot view channel');
+    if (!canManageOverwrites(nonMember))
+      problems.push('Non-member: bot lacks Manage Channels permission');
 
-    if (canManageOverwrites(vanquished)) {
-      // Allow unlinked users (no roles) to see vanquished.
-      await safeEdit('Vanquished', vanquished, everyoneRoleId, {
+    if (canManageOverwrites(nonMember)) {
+      // Allow unlinked users (no roles) to see the non-member area.
+      await safeEdit('Non-member', nonMember, everyoneRoleId, {
         ViewChannel: true,
         ReadMessageHistory: true,
         SendMessages: true,
@@ -233,20 +233,20 @@ export async function enforceChannelPermissions(ctx: AppContext, client: Client,
         ctx.cfg.ROLE_COLEADER_ID,
         ctx.cfg.ROLE_LEADER_ID,
       ]) {
-        await safeEdit('Vanquished', vanquished, roleId, {
+        await safeEdit('Non-member', nonMember, roleId, {
           ViewChannel: false,
         });
       }
 
-      // Allow explicitly-vanquished users too.
-      await safeEdit('Vanquished', vanquished, ctx.cfg.ROLE_VANQUISHED_ID, {
+      // Allow explicitly non-member users too.
+      await safeEdit('Non-member', nonMember, ctx.cfg.ROLE_NON_MEMBER_ID, {
         ViewChannel: true,
         ReadMessageHistory: true,
         SendMessages: true,
         UseApplicationCommands: true,
       });
 
-      await safeEdit('Vanquished', vanquished, meUser.id, {
+      await safeEdit('Non-member', nonMember, meUser.id, {
         ViewChannel: true,
         ReadMessageHistory: true,
         SendMessages: true,

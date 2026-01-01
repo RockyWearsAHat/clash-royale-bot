@@ -35,7 +35,7 @@ export async function pollEmptySpotsOnce(ctx: AppContext, client: Client): Promi
   }
 
   const guild = await client.guilds.fetch(ctx.cfg.GUILD_ID);
-  const ch = await guild.channels.fetch(ctx.cfg.CHANNEL_VANQUISHED_ID).catch(() => null);
+  const ch = await guild.channels.fetch(ctx.cfg.CHANNEL_NON_MEMBER_ID).catch(() => null);
   if (!ch || ch.type !== ChannelType.GuildText) return;
 
   const subscribers = dbListSpotSubscribers(ctx.db);
@@ -61,7 +61,7 @@ export async function pollEmptySpotsOnce(ctx: AppContext, client: Client): Promi
       continue;
     }
 
-    if (member.roles.cache.has(ctx.cfg.ROLE_VANQUISHED_ID)) {
+    if (member.roles.cache.has(ctx.cfg.ROLE_NON_MEMBER_ID)) {
       pingable.push(id);
     }
   }

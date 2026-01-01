@@ -4,11 +4,16 @@ import fs from 'node:fs';
 import path from 'node:path';
 import process from 'node:process';
 import { fileURLToPath } from 'node:url';
+import dotenv from 'dotenv';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const repoRoot = path.resolve(__dirname, '..');
 process.chdir(repoRoot);
+
+// Load .env so launcher flags (SKIP_INSTALL / REGISTER_COMMANDS) work even when
+// the user double-clicks a file or sets variables without exporting them.
+dotenv.config({ path: path.join(repoRoot, '.env') });
 
 function info(message) {
   process.stdout.write(`[run-bot] ${message}\n`);
@@ -70,7 +75,9 @@ async function main() {
   }
 
   const skipInstall = envFlag('SKIP_INSTALL');
-  const registerCommands = envFlag('REGISTER_COMMANDS');
+  // Default to registering commands so "double-click to run" works end-to-end.
+  // Users can opt out with REGISTER_COMMANDS=0 / false.
+  const registerCommands = envFlag('REGISTER_COMMANDS', '1');
 
   // npm availability check: attempt to run `npm --version`.
   try {

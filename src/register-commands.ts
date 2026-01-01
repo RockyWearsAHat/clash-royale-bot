@@ -272,14 +272,14 @@ async function applyCommandPermissions(
 
   const statsPerms = buildGuildWideChannelDenyList([cfg.CHANNEL_GENERAL_ID]);
   const warPerms = buildGuildWideChannelDenyList([cfg.CHANNEL_WAR_LOGS_ID]);
-  const vanquishedPerms = buildGuildWideChannelDenyList([cfg.CHANNEL_VANQUISHED_ID]);
+  const nonMemberPerms = buildGuildWideChannelDenyList([cfg.CHANNEL_NON_MEMBER_ID]);
 
   const payload = [
     { id: statsId, permissions: statsPerms },
     { id: warstatsId, permissions: warPerms },
     { id: warlogsId, permissions: warPerms },
-    { id: notifyWhenSpotId, permissions: vanquishedPerms },
-    { id: notifyNoMoreId, permissions: vanquishedPerms },
+    { id: notifyWhenSpotId, permissions: nonMemberPerms },
+    { id: notifyNoMoreId, permissions: nonMemberPerms },
   ];
 
   // Batch endpoint is disabled; apply per-command.

@@ -14,7 +14,12 @@ export const WhoAmICommand: SlashCommand = {
 
     if (!row) {
       await interaction.reply({
-        embeds: [infoEmbed('Not linked yet', 'Use `/join` to link your Clash Royale player tag.')],
+        embeds: [
+          infoEmbed(
+            'Not linked yet',
+            'The bot will create a verification thread for you automatically. Open your thread and paste your player tag (example: `#ABC123`).',
+          ),
+        ],
         ephemeral: true,
       });
       return;
