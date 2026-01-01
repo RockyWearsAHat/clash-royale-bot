@@ -1,8 +1,12 @@
 import {
+  ActionRowBuilder,
+  ButtonBuilder,
+  ButtonStyle,
   ChannelType,
   EmbedBuilder,
   SlashCommandBuilder,
   type ChatInputCommandInteraction,
+  type ButtonInteraction,
 } from 'discord.js';
 import type { SlashCommand } from './commands.js';
 import type { AppContext } from '../types.js';
@@ -41,6 +45,17 @@ type ResolvedParticipants = {
   source: 'snapshot' | 'live';
   note?: string;
 };
+
+type WarStatsRenderResult =
+  | {
+      ok: true;
+      firstEmbeds: EmbedBuilder[];
+      continuationEmbeds: EmbedBuilder[];
+    }
+  | {
+      ok: false;
+      errorEmbeds: EmbedBuilder[];
+    };
 
 function safeNumber(v: unknown): number | undefined {
   if (typeof v === 'number' && Number.isFinite(v)) return v;
@@ -344,6 +359,393 @@ function parseRelativeDayInput(raw: string): ParsedDayRef | null {
   return null;
 }
 
+function warstatsPublishCustomId(invokerUserId: string, parsed: ParsedDayRef | null): string {
+  const kind = parsed?.kind ?? 'default';
+  const n =
+    parsed && (parsed.kind === 'daysAgo' || parsed.kind === 'warDay' || parsed.kind === 'prepDay')
+      ? parsed.kind === 'daysAgo'
+        ? parsed.days
+        : parsed.day
+      : 0;
+  return `publish:warlogs:${invokerUserId}:${kind}:${n}`;
+}
+
+function decodeWarstatsPublishRef(kind: string, nRaw: string): ParsedDayRef | null {
+  const n = Number(nRaw);
+  const num = Number.isFinite(n) ? Math.trunc(n) : 0;
+
+  switch (kind) {
+    case 'default':
+      return null;
+    case 'live':
+      return { kind: 'live' };
+    case 'latest':
+      return { kind: 'latest' };
+    case 'daysAgo':
+      return { kind: 'daysAgo', days: Math.max(0, num) };
+    case 'warDay':
+      if (num >= 1 && num <= 4) return { kind: 'warDay', day: num };
+      return null;
+    case 'prepDay':
+      if (num >= 1) return { kind: 'prepDay', day: num };
+      return null;
+    default:
+      return null;
+  }
+}
+
+function buildWarstatsPublishRow(customId: string, disabled = false) {
+  return new ActionRowBuilder<ButtonBuilder>().addComponents(
+    new ButtonBuilder()
+      .setCustomId(customId)
+      .setLabel(disabled ? 'Posted' : 'Post publicly')
+      .setStyle(ButtonStyle.Secondary)
+      .setDisabled(disabled),
+  );
+}
+
+function renderWarStatsEmbedsFromData(
+  ctx: AppContext,
+  args: {
+    parsed: ParsedDayRef | null;
+    dayArgRaw: string | null;
+    payload: any;
+    log: any;
+    roster: any[];
+  },
+): WarStatsRenderResult {
+  const { parsed, dayArgRaw, payload, log, roster } = args;
+
+  if (dayArgRaw && !parsed) {
+    return {
+      ok: false,
+      errorEmbeds: [
+        infoEmbed(
+          'Invalid day format',
+          "I couldn't understand that `day` value. Try one of: `live`, `yesterday`, `2 days ago`, `war day 4`, `wd4`, `last`, `prep day 1`.",
+        ),
+      ],
+    };
+  }
+
+  const currentDayIndex = inferCurrentDayIndex(payload);
+  const livePhase = inferPhaseFromPayload(payload);
+  const liveParticipants = extractParticipants(payload);
+  const resolved = parsed
+    ? resolveParticipantsForRef(ctx, parsed, liveParticipants)
+    : ({ label: 'live', participants: liveParticipants, source: 'live' } as ResolvedParticipants);
+  const participants = resolved.participants;
+
+  if (!participants || participants.size === 0) {
+    return {
+      ok: false,
+      errorEmbeds: [
+        infoEmbed(
+          'No war participant data available',
+          resolved.note ??
+            'I could not find a saved snapshot for that request, and the live API response did not include participants.',
+        ),
+      ],
+    };
+  }
+
+  const nameByTag = new Map<string, string>();
+  for (const m of roster) {
+    const tag = normalizeTagUpper(m.tag);
+    if (tag) nameByTag.set(tag, m.name);
+  }
+
+  const items: any[] = Array.isArray(log?.items) ? log.items : [];
+  const clanTag = ctx.cfg.CLASH_CLAN_TAG.toUpperCase();
+
+  // Overall win rate (use recorded history if present, otherwise fall back to API log).
+  const recordedAgg = ctx.db
+    .prepare(
+      `SELECT
+           COALESCE(SUM(CASE WHEN rank = 1 THEN 1 ELSE 0 END), 0) AS wins,
+           COALESCE(SUM(CASE WHEN rank IS NOT NULL AND rank <> 1 THEN 1 ELSE 0 END), 0) AS losses
+         FROM war_history
+         WHERE clan_tag = ?`,
+    )
+    .get(clanTag) as { wins: number; losses: number } | undefined;
+
+  let wins = recordedAgg?.wins ?? 0;
+  let losses = recordedAgg?.losses ?? 0;
+
+  if (wins + losses === 0) {
+    for (const it of items) {
+      const standings: any[] = Array.isArray(it?.standings) ? it.standings : [];
+      const ours = standings.find((s) => String(s?.clan?.tag ?? '').toUpperCase() === clanTag);
+      const rank = typeof ours?.rank === 'number' ? ours.rank : undefined;
+      if (!rank) continue;
+      if (rank === 1) wins += 1;
+      else losses += 1;
+    }
+    if (wins + losses === 0 && items.length > 0) losses = items.length - wins;
+  }
+
+  const warsCount = wins + losses;
+  const winRate = warsCount > 0 ? (wins / warsCount) * 100 : 0;
+
+  const viewPhase: 'warDay' | 'prepDay' =
+    parsed?.kind === 'prepDay'
+      ? 'prepDay'
+      : parsed && parsed.kind !== 'live'
+        ? 'warDay'
+        : livePhase;
+
+  const dayIdx =
+    resolved.warDayIndex ??
+    (viewPhase === 'warDay' ? clampWarDayIndex(currentDayIndex) : undefined);
+
+  const phaseLabel =
+    viewPhase === 'prepDay' ? 'Prep day' : dayIdx ? `War day ${dayIdx}` : 'War day';
+
+  const viewLabel =
+    parsed && parsed.kind === 'live' ? phaseLabel : parsed ? resolved.label : phaseLabel;
+
+  const embed = infoEmbed('War Overview', viewLabel)
+    .setTimestamp(new Date())
+    .addFields(
+      { name: 'Win rate', value: warsCount > 0 ? pct(winRate) : '—', inline: true },
+      { name: 'Record', value: warsCount > 0 ? `${wins}-${losses}` : '—', inline: true },
+    );
+
+  if (resolved.note) embed.addFields({ name: 'Note', value: resolved.note, inline: false });
+
+  const noBattles: string[] = [];
+
+  const tags = roster.length
+    ? roster.map((m) => normalizeTagUpper(m.tag)).filter((t): t is string => Boolean(t))
+    : Array.from(participants.keys());
+
+  let participationTitle = `${phaseLabel} participation`;
+  let participationChunks: string[] = [];
+
+  if (viewPhase === 'prepDay') {
+    const scored = tags
+      .map((tag) => {
+        const snap = participants.get(tag) ?? {};
+        const decksUsedToday = snap.decksUsedToday ?? snap.decksUsed ?? 0;
+        return { tag, decksUsedToday };
+      })
+      .sort((a, b) => (b.decksUsedToday ?? 0) - (a.decksUsedToday ?? 0));
+
+    for (const { tag, decksUsedToday } of scored) {
+      const snap = participants.get(tag) ?? {};
+      const name = nameByTag.get(tag) ?? tag;
+      const fame = snap.fame ?? 0;
+      if ((decksUsedToday ?? 0) <= 0 && (fame ?? 0) <= 0) noBattles.push(name);
+    }
+
+    const header = ' TODAY  PLAYER';
+    const rows = buildPrepDayParticipationRows(scored, nameByTag);
+    participationChunks = chunkTableForEmbed(header, rows);
+  } else {
+    const decksTotalAvail = decksAvailableForWarDay(dayIdx);
+
+    // If viewing a historical snapshot, try to derive "today" (that war day) decks
+    // as a diff against the previous day's snapshot.
+    let prevSnapshotTotals: Map<string, ParticipantSnapshot> | undefined;
+    if (resolved.source === 'snapshot' && resolved.snapshotEndAtMs && dayIdx && dayIdx > 1) {
+      const history = readSnapshotHistory(ctx)
+        .filter((e) => e && typeof e.endAtIso === 'string' && e.snapshot)
+        .map((e) => {
+          const t = new Date(String(e.endAtIso)).getTime();
+          const di = typeof e.dayIndex === 'number' ? e.dayIndex : undefined;
+          return { e, t: Number.isFinite(t) ? t : NaN, dayIndex: di };
+        })
+        .filter((x) => Number.isFinite(x.t));
+
+      const candidates = history
+        .filter(
+          (x) =>
+            x.dayIndex === dayIdx - 1 &&
+            typeof x.e.snapshot === 'object' &&
+            x.t < (resolved.snapshotEndAtMs as number) &&
+            (resolved.snapshotEndAtMs as number) - x.t <= 60 * 60 * 1000 * 60,
+        )
+        .sort((a, b) => b.t - a.t);
+
+      const pickedPrev = candidates[0];
+      if (pickedPrev) prevSnapshotTotals = snapshotRecordToMap(pickedPrev.e.snapshot as any);
+    }
+
+    const scored = tags
+      .map((tag) => {
+        const snap = participants.get(tag) ?? {};
+        const fame = snap.fame ?? 0;
+        const decksTotalUsed = snap.decksUsed ?? 0;
+
+        let decksUsedToday = snap.decksUsedToday ?? 0;
+        if (resolved.source === 'snapshot') {
+          const prev = prevSnapshotTotals?.get(tag);
+          const prevTotal = prev?.decksUsed ?? 0;
+          decksUsedToday = clampNonNegative(decksTotalUsed - prevTotal);
+        }
+
+        // Cap to a single war-day worth of decks.
+        if (decksUsedToday > 4) decksUsedToday = 4;
+
+        return { tag, fame, decksUsedToday, decksTotalUsed, decksTotalAvail };
+      })
+      .sort(
+        (a, b) =>
+          (b.fame ?? 0) - (a.fame ?? 0) ||
+          (b.decksTotalUsed ?? 0) - (a.decksTotalUsed ?? 0) ||
+          (b.decksUsedToday ?? 0) - (a.decksUsedToday ?? 0),
+      );
+
+    for (const { tag, decksUsedToday } of scored) {
+      const name = nameByTag.get(tag) ?? tag;
+      if ((decksUsedToday ?? 0) <= 0) noBattles.push(name);
+    }
+
+    const header = ` FAME  TODAY  TOTAL  PLAYER`;
+    const rows = buildWarDayParticipationRows(scored, nameByTag);
+    participationChunks = chunkTableForEmbed(header, rows);
+  }
+
+  const noBattlesText = formatNoBattles(noBattles);
+  const firstParticipation = infoEmbed(participationTitle, participationChunks[0]).addFields({
+    name: `No activity (${noBattles.length})`,
+    value: noBattlesText,
+    inline: false,
+  });
+
+  const continuationEmbeds = participationChunks
+    .slice(1)
+    .map((extra) => infoEmbed('Participation — continued', extra));
+
+  return { ok: true, firstEmbeds: [embed, firstParticipation], continuationEmbeds };
+}
+
+async function renderWarStatsEmbeds(
+  ctx: AppContext,
+  parsed: ParsedDayRef | null,
+  dayArgRaw: string | null,
+): Promise<WarStatsRenderResult> {
+  if (dayArgRaw && !parsed) {
+    return {
+      ok: false,
+      errorEmbeds: [
+        infoEmbed(
+          'Invalid day format',
+          "I couldn't understand that `day` value. Try one of: `live`, `yesterday`, `2 days ago`, `war day 4`, `wd4`, `last`, `prep day 1`.",
+        ),
+      ],
+    };
+  }
+
+  const [payload, log, roster] = await Promise.all([
+    ctx.clash.getCurrentRiverRace(ctx.cfg.CLASH_CLAN_TAG),
+    ctx.clash.getRiverRaceLog(ctx.cfg.CLASH_CLAN_TAG),
+    ctx.clash.getClanMembers(ctx.cfg.CLASH_CLAN_TAG).catch(() => []),
+  ]);
+
+  return renderWarStatsEmbedsFromData(ctx, { parsed, dayArgRaw, payload, log, roster });
+}
+
+export async function handleWarlogsPublishButton(ctx: AppContext, interaction: ButtonInteraction) {
+  const id = interaction.customId;
+  if (!id.startsWith('publish:warlogs:')) return;
+
+  if (!interaction.inGuild()) {
+    await interaction.reply({ content: 'This button must be used in a server.', ephemeral: true });
+    return;
+  }
+
+  const parts = id.split(':');
+  const invokerUserId = parts[2] ?? '';
+  const kind = parts[3] ?? '';
+  const nRaw = parts[4] ?? '0';
+
+  if (!invokerUserId || interaction.user.id !== invokerUserId) {
+    await interaction.reply({
+      content: 'Only the user who ran the command can use this button.',
+      ephemeral: true,
+    });
+    return;
+  }
+
+  if (!interaction.channel || !interaction.channel.isTextBased()) {
+    await interaction.reply({ content: 'This must be used in a text channel.', ephemeral: true });
+    return;
+  }
+
+  const baseChannelId = interaction.channel.isThread()
+    ? interaction.channel.parentId
+    : interaction.channel.type === ChannelType.GuildText
+      ? interaction.channel.id
+      : null;
+
+  if (!baseChannelId || baseChannelId !== ctx.cfg.CHANNEL_WAR_LOGS_ID) {
+    await interaction.reply({
+      content: `Please run /warlogs in <#${ctx.cfg.CHANNEL_WAR_LOGS_ID}> to post publicly.`,
+      ephemeral: true,
+    });
+    return;
+  }
+
+  const parsed = decodeWarstatsPublishRef(kind, nRaw);
+
+  // Note: "default" intentionally decodes to null (live view).
+  if (kind !== 'default' && !parsed) {
+    await interaction.reply({
+      content: 'That publish button is no longer valid. Please re-run the command.',
+      ephemeral: true,
+    });
+    return;
+  }
+
+  // Ephemeral messages are not reliably deletable. Immediately clear the UI so the
+  // "private menu" disappears and users can't double-post.
+  try {
+    await interaction.update({ content: 'Posting publicly…', embeds: [], components: [] });
+  } catch {
+    try {
+      await interaction.deferUpdate();
+    } catch {
+      // ignore
+    }
+  }
+
+  let render: WarStatsRenderResult;
+  try {
+    render = await renderWarStatsEmbeds(ctx, parsed, null);
+  } catch {
+    await interaction.followUp({
+      content: 'Failed to build war logs right now. Try again shortly.',
+      ephemeral: true,
+    });
+    return;
+  }
+
+  if (!render.ok) {
+    try {
+      await interaction.editReply({ embeds: render.errorEmbeds, components: [] });
+    } catch {
+      // ignore
+    }
+    return;
+  }
+
+  const commandName = (interaction.message as any)?.interaction?.commandName ?? 'warlogs';
+  const first = await interaction.channel.send({
+    content: `*${interaction.user.toString()}* used **/${commandName}**:\n`,
+    embeds: render.firstEmbeds,
+  });
+  for (const e of render.continuationEmbeds) {
+    await interaction.channel.send({ embeds: [e] });
+  }
+
+  try {
+    await interaction.editReply({ content: 'Posted publicly.', embeds: [], components: [] });
+  } catch {
+    // ignore
+  }
+}
+
 function readSnapshotHistory(ctx: AppContext): SnapshotHistoryEntry[] {
   const raw = ctx.db
     .prepare('SELECT value FROM job_state WHERE key = ?')
@@ -507,296 +909,121 @@ export const WarStatsCommand: SlashCommand = {
     const dayArg = interaction.options.getString('day');
     const parsed = dayArg ? parseRelativeDayInput(dayArg) : null;
 
-    if (dayArg && !parsed) {
-      await interaction.editReply({
-        embeds: [
-          infoEmbed(
-            'Invalid day format',
-            "I couldn't understand that `day` value. Try one of: `live`, `yesterday`, `2 days ago`, `war day 4`, `wd4`, `last`, `prep day 1`.",
-          ),
-        ],
-      });
-      return;
-    }
-
+    // Fetch once for rendering + optional debug logs.
     const [payload, log, roster] = await Promise.all([
       ctx.clash.getCurrentRiverRace(ctx.cfg.CLASH_CLAN_TAG),
       ctx.clash.getRiverRaceLog(ctx.cfg.CLASH_CLAN_TAG),
       ctx.clash.getClanMembers(ctx.cfg.CLASH_CLAN_TAG).catch(() => []),
     ]);
 
-    const currentDayIndex = inferCurrentDayIndex(payload);
-    const livePhase = inferPhaseFromPayload(payload);
-    const liveParticipants = extractParticipants(payload);
-    const resolved = parsed
-      ? resolveParticipantsForRef(ctx, parsed, liveParticipants)
-      : ({ label: 'live', participants: liveParticipants, source: 'live' } as ResolvedParticipants);
-    const participants = resolved.participants;
+    // Preserve existing debug logging behavior (only for the slash command path).
+    if (ctx.cfg.WARLOGS_DEBUG) {
+      try {
+        const participants = parsed
+          ? resolveParticipantsForRef(ctx, parsed, extractParticipants(payload)).participants
+          : extractParticipants(payload);
 
-    if (!participants || participants.size === 0) {
-      await interaction.editReply({
-        embeds: [
-          infoEmbed(
-            'No war participant data available',
-            resolved.note ??
-              'I could not find a saved snapshot for that request, and the live API response did not include participants.',
-          ),
-        ],
-      });
+        const debugTargets = ctx.cfg.WARLOGS_DEBUG_PLAYERS.split(',')
+          .map((s) => s.trim())
+          .filter(Boolean);
+
+        const periodType = typeof payload?.periodType === 'string' ? payload.periodType : undefined;
+        const idx =
+          (typeof payload?.periodIndex !== 'undefined' ? payload.periodIndex : undefined) ??
+          (typeof payload?.dayIndex !== 'undefined' ? payload.dayIndex : undefined) ??
+          (typeof payload?.warDay !== 'undefined' ? payload.warDay : undefined) ??
+          (typeof payload?.sectionIndex !== 'undefined' ? payload.sectionIndex : undefined);
+
+        const rawParticipants: any[] = Array.isArray(payload?.clan?.participants)
+          ? payload.clan.participants
+          : [];
+        const sampleTags = rawParticipants
+          .slice(0, 10)
+          .map((p) => normalizeTagUpper(p?.tag ?? p?.playerTag ?? p?.memberTag) ?? '(missing tag)');
+
+        console.log(
+          '[warlogs debug] periodType=%s idx=%s participants=%d sampleTags=%j',
+          periodType ?? '(unknown)',
+          idx ?? '(unknown)',
+          rawParticipants.length,
+          sampleTags,
+        );
+
+        if (debugTargets.length) {
+          const rosterByName = new Map<string, { tag: string; name: string }>();
+          for (const m of roster) {
+            const t = normalizeTagUpper(m.tag);
+            if (!t) continue;
+            rosterByName.set(normalizeName(m.name), { tag: t, name: m.name });
+          }
+
+          for (const targetName of debugTargets) {
+            const rosterHit = rosterByName.get(normalizeName(targetName));
+            if (!rosterHit) {
+              console.log('[warlogs debug] roster lookup failed for name=%j', targetName);
+              continue;
+            }
+
+            const raw = findRawParticipantByTag(payload, rosterHit.tag);
+            const snap = participants?.get(rosterHit.tag);
+            const decks = snap?.decksUsed ?? 0;
+            const fame = snap?.fame ?? 0;
+            const repairs = snap?.repairs ?? 0;
+            const boatAttacks = snap?.boatAttacks ?? 0;
+            const wouldBeNoBattles = decks <= 0 && fame <= 0 && repairs <= 0 && boatAttacks <= 0;
+            console.log(
+              '[warlogs debug] player=%s tag=%s inParticipantsMap=%s decks=%s fame=%s repairs=%s rawKeys=%j',
+              rosterHit.name,
+              rosterHit.tag,
+              String(Boolean(snap)),
+              String(snap?.decksUsed ?? '(none)'),
+              String(snap?.fame ?? '(none)'),
+              String(snap?.repairs ?? '(none)'),
+              raw ? Object.keys(raw) : '(no raw participant entry)',
+            );
+            console.log(
+              '[warlogs debug] computed wouldBeNoBattles=%s (decks=%s fame=%s repairs=%s boatAttacks=%s)',
+              String(wouldBeNoBattles),
+              String(decks),
+              String(fame),
+              String(repairs),
+              String(boatAttacks),
+            );
+            if (raw) {
+              console.log(
+                '[warlogs debug] raw decksUsed=%s decksUsedToday=%s decksUsedThisDay=%s',
+                String(raw?.decksUsed ?? '(missing)'),
+                String(raw?.decksUsedToday ?? '(missing)'),
+                String(raw?.decksUsedThisDay ?? '(missing)'),
+              );
+              console.log('[warlogs debug] rawParticipant=%j', raw);
+            }
+          }
+        }
+      } catch {
+        // ignore
+      }
+    }
+
+    const render = renderWarStatsEmbedsFromData(ctx, {
+      parsed,
+      dayArgRaw: dayArg,
+      payload,
+      log,
+      roster,
+    });
+    if (!render.ok) {
+      await interaction.editReply({ embeds: render.errorEmbeds });
       return;
     }
 
-    const nameByTag = new Map<string, string>();
-    for (const m of roster) {
-      const tag = normalizeTagUpper(m.tag);
-      if (tag) nameByTag.set(tag, m.name);
-    }
+    const customId = warstatsPublishCustomId(interaction.user.id, parsed);
+    const row = buildWarstatsPublishRow(customId);
 
-    if (ctx.cfg.WARLOGS_DEBUG) {
-      const debugTargets = ctx.cfg.WARLOGS_DEBUG_PLAYERS.split(',')
-        .map((s) => s.trim())
-        .filter(Boolean);
+    await interaction.editReply({ embeds: render.firstEmbeds, components: [row] });
 
-      const periodType = typeof payload?.periodType === 'string' ? payload.periodType : undefined;
-      const idx =
-        (typeof payload?.periodIndex !== 'undefined' ? payload.periodIndex : undefined) ??
-        (typeof payload?.dayIndex !== 'undefined' ? payload.dayIndex : undefined) ??
-        (typeof payload?.warDay !== 'undefined' ? payload.warDay : undefined) ??
-        (typeof payload?.sectionIndex !== 'undefined' ? payload.sectionIndex : undefined);
-
-      const rawParticipants: any[] = Array.isArray(payload?.clan?.participants)
-        ? payload.clan.participants
-        : [];
-      const sampleTags = rawParticipants
-        .slice(0, 10)
-        .map((p) => normalizeTagUpper(p?.tag ?? p?.playerTag ?? p?.memberTag) ?? '(missing tag)');
-
-      console.log(
-        '[warlogs debug] periodType=%s idx=%s participants=%d sampleTags=%j',
-        periodType ?? '(unknown)',
-        idx ?? '(unknown)',
-        rawParticipants.length,
-        sampleTags,
-      );
-
-      if (debugTargets.length) {
-        const rosterByName = new Map<string, { tag: string; name: string }>();
-        for (const m of roster) {
-          const t = normalizeTagUpper(m.tag);
-          if (!t) continue;
-          rosterByName.set(normalizeName(m.name), { tag: t, name: m.name });
-        }
-
-        for (const targetName of debugTargets) {
-          const rosterHit = rosterByName.get(normalizeName(targetName));
-          if (!rosterHit) {
-            console.log('[warlogs debug] roster lookup failed for name=%j', targetName);
-            continue;
-          }
-
-          const raw = findRawParticipantByTag(payload, rosterHit.tag);
-          const snap = participants.get(rosterHit.tag);
-          const decks = snap?.decksUsed ?? 0;
-          const fame = snap?.fame ?? 0;
-          const repairs = snap?.repairs ?? 0;
-          const boatAttacks = snap?.boatAttacks ?? 0;
-          const wouldBeNoBattles = decks <= 0 && fame <= 0 && repairs <= 0 && boatAttacks <= 0;
-          console.log(
-            '[warlogs debug] player=%s tag=%s inParticipantsMap=%s decks=%s fame=%s repairs=%s rawKeys=%j',
-            rosterHit.name,
-            rosterHit.tag,
-            String(Boolean(snap)),
-            String(snap?.decksUsed ?? '(none)'),
-            String(snap?.fame ?? '(none)'),
-            String(snap?.repairs ?? '(none)'),
-            raw ? Object.keys(raw) : '(no raw participant entry)',
-          );
-          console.log(
-            '[warlogs debug] computed wouldBeNoBattles=%s (decks=%s fame=%s repairs=%s boatAttacks=%s)',
-            String(wouldBeNoBattles),
-            String(decks),
-            String(fame),
-            String(repairs),
-            String(boatAttacks),
-          );
-          if (raw) {
-            console.log(
-              '[warlogs debug] raw decksUsed=%s decksUsedToday=%s decksUsedThisDay=%s',
-              String(raw?.decksUsed ?? '(missing)'),
-              String(raw?.decksUsedToday ?? '(missing)'),
-              String(raw?.decksUsedThisDay ?? '(missing)'),
-            );
-            console.log('[warlogs debug] rawParticipant=%j', raw);
-          }
-        }
-      }
-    }
-
-    const items: any[] = Array.isArray(log?.items) ? log.items : [];
-    const clanTag = ctx.cfg.CLASH_CLAN_TAG.toUpperCase();
-
-    // Overall win rate (use recorded history if present, otherwise fall back to API log).
-    const recordedAgg = ctx.db
-      .prepare(
-        `SELECT
-           COALESCE(SUM(CASE WHEN rank = 1 THEN 1 ELSE 0 END), 0) AS wins,
-           COALESCE(SUM(CASE WHEN rank IS NOT NULL AND rank <> 1 THEN 1 ELSE 0 END), 0) AS losses
-         FROM war_history
-         WHERE clan_tag = ?`,
-      )
-      .get(clanTag) as { wins: number; losses: number } | undefined;
-
-    let wins = recordedAgg?.wins ?? 0;
-    let losses = recordedAgg?.losses ?? 0;
-
-    if (wins + losses === 0) {
-      for (const it of items) {
-        const standings: any[] = Array.isArray(it?.standings) ? it.standings : [];
-        const ours = standings.find((s) => String(s?.clan?.tag ?? '').toUpperCase() === clanTag);
-        const rank = typeof ours?.rank === 'number' ? ours.rank : undefined;
-        if (!rank) continue;
-        if (rank === 1) wins += 1;
-        else losses += 1;
-      }
-      if (wins + losses === 0 && items.length > 0) losses = items.length - wins;
-    }
-
-    const warsCount = wins + losses;
-    const winRate = warsCount > 0 ? (wins / warsCount) * 100 : 0;
-
-    const viewPhase: 'warDay' | 'prepDay' =
-      parsed?.kind === 'prepDay'
-        ? 'prepDay'
-        : parsed && parsed.kind !== 'live'
-          ? 'warDay'
-          : livePhase;
-
-    const dayIdx =
-      resolved.warDayIndex ??
-      (viewPhase === 'warDay' ? clampWarDayIndex(currentDayIndex) : undefined);
-
-    const phaseLabel =
-      viewPhase === 'prepDay' ? 'Prep day' : dayIdx ? `War day ${dayIdx}` : 'War day';
-
-    const viewLabel =
-      parsed && parsed.kind === 'live' ? phaseLabel : parsed ? resolved.label : phaseLabel;
-
-    const embed = infoEmbed('War Overview', viewLabel)
-      .setTimestamp(new Date())
-      .addFields(
-        { name: 'Win rate', value: warsCount > 0 ? pct(winRate) : '—', inline: true },
-        { name: 'Record', value: warsCount > 0 ? `${wins}-${losses}` : '—', inline: true },
-      );
-
-    if (resolved.note) embed.addFields({ name: 'Note', value: resolved.note, inline: false });
-
-    const noBattles: string[] = [];
-
-    const tags = roster.length
-      ? roster.map((m) => normalizeTagUpper(m.tag)).filter((t): t is string => Boolean(t))
-      : Array.from(participants.keys());
-
-    let participationTitle = `${phaseLabel} participation`;
-    let participationChunks: string[] = [];
-
-    if (viewPhase === 'prepDay') {
-      const scored = tags
-        .map((tag) => {
-          const snap = participants.get(tag) ?? {};
-          const decksUsedToday = snap.decksUsedToday ?? snap.decksUsed ?? 0;
-          return { tag, decksUsedToday };
-        })
-        .sort((a, b) => (b.decksUsedToday ?? 0) - (a.decksUsedToday ?? 0));
-
-      for (const { tag, decksUsedToday } of scored) {
-        const snap = participants.get(tag) ?? {};
-        const name = nameByTag.get(tag) ?? tag;
-        const fame = snap.fame ?? 0;
-        if ((decksUsedToday ?? 0) <= 0 && (fame ?? 0) <= 0) noBattles.push(name);
-      }
-
-      const header = ' TODAY  PLAYER';
-      const rows = buildPrepDayParticipationRows(scored, nameByTag);
-      participationChunks = chunkTableForEmbed(header, rows);
-    } else {
-      const decksTotalAvail = decksAvailableForWarDay(dayIdx);
-
-      // If viewing a historical snapshot, try to derive "today" (that war day) decks
-      // as a diff against the previous day's snapshot.
-      let prevSnapshotTotals: Map<string, ParticipantSnapshot> | undefined;
-      if (resolved.source === 'snapshot' && resolved.snapshotEndAtMs && dayIdx && dayIdx > 1) {
-        const history = readSnapshotHistory(ctx)
-          .filter((e) => e && typeof e.endAtIso === 'string' && e.snapshot)
-          .map((e) => {
-            const t = new Date(String(e.endAtIso)).getTime();
-            const di = typeof e.dayIndex === 'number' ? e.dayIndex : undefined;
-            return { e, t: Number.isFinite(t) ? t : NaN, dayIndex: di };
-          })
-          .filter((x) => Number.isFinite(x.t));
-
-        const candidates = history
-          .filter(
-            (x) =>
-              x.dayIndex === dayIdx - 1 &&
-              typeof x.e.snapshot === 'object' &&
-              x.t < (resolved.snapshotEndAtMs as number) &&
-              (resolved.snapshotEndAtMs as number) - x.t <= 60 * 60 * 1000 * 60,
-          )
-          .sort((a, b) => b.t - a.t);
-
-        const pickedPrev = candidates[0];
-        if (pickedPrev) prevSnapshotTotals = snapshotRecordToMap(pickedPrev.e.snapshot as any);
-      }
-
-      const scored = tags
-        .map((tag) => {
-          const snap = participants.get(tag) ?? {};
-          const fame = snap.fame ?? 0;
-          const decksTotalUsed = snap.decksUsed ?? 0;
-
-          let decksUsedToday = snap.decksUsedToday ?? 0;
-          if (resolved.source === 'snapshot') {
-            const prev = prevSnapshotTotals?.get(tag);
-            const prevTotal = prev?.decksUsed ?? 0;
-            decksUsedToday = clampNonNegative(decksTotalUsed - prevTotal);
-          }
-
-          // Cap to a single war-day worth of decks.
-          if (decksUsedToday > 4) decksUsedToday = 4;
-
-          return { tag, fame, decksUsedToday, decksTotalUsed, decksTotalAvail };
-        })
-        .sort(
-          (a, b) =>
-            (b.fame ?? 0) - (a.fame ?? 0) ||
-            (b.decksTotalUsed ?? 0) - (a.decksTotalUsed ?? 0) ||
-            (b.decksUsedToday ?? 0) - (a.decksUsedToday ?? 0),
-        );
-
-      for (const { tag, decksUsedToday } of scored) {
-        const name = nameByTag.get(tag) ?? tag;
-        if ((decksUsedToday ?? 0) <= 0) noBattles.push(name);
-      }
-
-      const header = ` FAME  TODAY  TOTAL  PLAYER`;
-      const rows = buildWarDayParticipationRows(scored, nameByTag);
-      participationChunks = chunkTableForEmbed(header, rows);
-    }
-
-    const noBattlesText = formatNoBattles(noBattles);
-    const firstParticipation = infoEmbed(participationTitle, participationChunks[0]).addFields({
-      name: `No activity (${noBattles.length})`,
-      value: noBattlesText,
-      inline: false,
-    });
-
-    await interaction.editReply({ embeds: [embed, firstParticipation] });
-
-    for (const extra of participationChunks.slice(1)) {
-      await interaction.followUp({
-        ephemeral: true,
-        embeds: [infoEmbed('Participation — continued', extra)],
-      });
+    for (const e of render.continuationEmbeds) {
+      await interaction.followUp({ ephemeral: true, embeds: [e] });
     }
   },
 };

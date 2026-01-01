@@ -1,12 +1,140 @@
 import {
+  ActionRowBuilder,
+  ButtonBuilder,
+  ButtonStyle,
   ChannelType,
   EmbedBuilder,
   SlashCommandBuilder,
   type ChatInputCommandInteraction,
+  type ButtonInteraction,
 } from 'discord.js';
 import type { SlashCommand } from './commands.js';
 import type { AppContext } from '../types.js';
 import { infoEmbed } from './ui.js';
+
+function statsPublishCustomId(invokerUserId: string, playerTag: string): string {
+  const tagNoHash = String(playerTag ?? '')
+    .trim()
+    .toUpperCase()
+    .replace(/^#/, '');
+  return `publish:stats:${invokerUserId}:${tagNoHash}`;
+}
+
+function buildStatsPublishRow(customId: string, disabled = false) {
+  return new ActionRowBuilder<ButtonBuilder>().addComponents(
+    new ButtonBuilder()
+      .setCustomId(customId)
+      .setLabel(disabled ? 'Posted' : 'Post publicly')
+      .setStyle(ButtonStyle.Secondary)
+      .setDisabled(disabled),
+  );
+}
+
+function getBaseChannelId(interaction: { channel: any }): string | null {
+  const ch = interaction.channel;
+  if (!ch) return null;
+  return ch.isThread() ? ch.parentId : ch.type === ChannelType.GuildText ? ch.id : null;
+}
+
+function buildStatsEmbed(player: any): EmbedBuilder {
+  const embed = new EmbedBuilder().setTitle('Player Stats');
+  embed.setDescription(`**${player.name}** (${player.tag})`);
+
+  embed.addFields(
+    { name: 'Trophies', value: fmt(player.trophies), inline: true },
+    { name: 'Best', value: fmt(player.bestTrophies), inline: true },
+    { name: 'Level', value: fmt(player.expLevel), inline: true },
+    { name: 'Wins', value: fmt(player.wins), inline: true },
+    { name: 'Losses', value: fmt(player.losses), inline: true },
+    { name: 'Battles', value: fmt(player.battleCount), inline: true },
+    { name: '3-Crown Wins', value: fmt(player.threeCrownWins), inline: true },
+    { name: 'Donations', value: fmt(player.donations), inline: true },
+    { name: 'Received', value: fmt(player.donationsReceived), inline: true },
+  );
+
+  if (player.clan?.name) {
+    embed.addFields({
+      name: 'Clan',
+      value: `${player.clan.name}${player.clan.role ? ` (${player.clan.role})` : ''}`,
+      inline: false,
+    });
+  }
+
+  return embed;
+}
+
+export async function handleStatsPublishButton(ctx: AppContext, interaction: ButtonInteraction) {
+  const id = interaction.customId;
+  if (!id.startsWith('publish:stats:')) return;
+
+  if (!interaction.inGuild()) {
+    await interaction.reply({ content: 'This button must be used in a server.', ephemeral: true });
+    return;
+  }
+
+  const parts = id.split(':');
+  const invokerUserId = parts[2] ?? '';
+  const tagPart = parts[3] ?? '';
+
+  if (!invokerUserId || interaction.user.id !== invokerUserId) {
+    await interaction.reply({
+      content: 'Only the user who ran the command can use this button.',
+      ephemeral: true,
+    });
+    return;
+  }
+
+  const baseChannelId = getBaseChannelId(interaction);
+  if (!baseChannelId || baseChannelId !== ctx.cfg.CHANNEL_GENERAL_ID) {
+    await interaction.reply({
+      content: `Please run /stats in <#${ctx.cfg.CHANNEL_GENERAL_ID}> to post publicly.`,
+      ephemeral: true,
+    });
+    return;
+  }
+
+  if (!interaction.channel || !interaction.channel.isTextBased()) {
+    await interaction.reply({ content: 'This must be used in a text channel.', ephemeral: true });
+    return;
+  }
+
+  // Ephemeral messages are not reliably deletable. Immediately clear the UI so the
+  // "private menu" disappears and users can't double-post.
+  try {
+    await interaction.update({ content: 'Posting publicly…', embeds: [], components: [] });
+  } catch {
+    try {
+      await interaction.deferUpdate();
+    } catch {
+      // ignore
+    }
+  }
+
+  const tag = normalizeTag(tagPart);
+  let player: any;
+  try {
+    player = await ctx.clash.getPlayer(tag);
+  } catch {
+    await interaction.followUp({
+      content: `Could not fetch player data for **${tag}** right now. Try again shortly.`,
+      ephemeral: true,
+    });
+    return;
+  }
+
+  const embed = buildStatsEmbed(player);
+  const commandName = (interaction.message as any)?.interaction?.commandName ?? 'stats';
+  await interaction.channel.send({
+    content: `*${interaction.user.toString()}* used **/${commandName}**:\n`,
+    embeds: [embed],
+  });
+
+  try {
+    await interaction.editReply({ content: 'Posted publicly.', embeds: [], components: [] });
+  } catch {
+    // ignore
+  }
+}
 
 function fmt(n: unknown): string {
   return typeof n === 'number' && Number.isFinite(n) ? String(n) : '—';
@@ -154,29 +282,10 @@ export const StatsCommand: SlashCommand = {
 
     const player = await ctx.clash.getPlayer(resolved.tag);
 
-    const embed = new EmbedBuilder().setTitle('Player Stats');
-    embed.setDescription(`**${player.name}** (${player.tag})`);
+    const embed = buildStatsEmbed(player);
+    const customId = statsPublishCustomId(interaction.user.id, player.tag);
+    const row = buildStatsPublishRow(customId);
 
-    embed.addFields(
-      { name: 'Trophies', value: fmt(player.trophies), inline: true },
-      { name: 'Best', value: fmt(player.bestTrophies), inline: true },
-      { name: 'Level', value: fmt(player.expLevel), inline: true },
-      { name: 'Wins', value: fmt(player.wins), inline: true },
-      { name: 'Losses', value: fmt(player.losses), inline: true },
-      { name: 'Battles', value: fmt(player.battleCount), inline: true },
-      { name: '3-Crown Wins', value: fmt(player.threeCrownWins), inline: true },
-      { name: 'Donations', value: fmt(player.donations), inline: true },
-      { name: 'Received', value: fmt(player.donationsReceived), inline: true },
-    );
-
-    if (player.clan?.name) {
-      embed.addFields({
-        name: 'Clan',
-        value: `${player.clan.name}${player.clan.role ? ` (${player.clan.role})` : ''}`,
-        inline: false,
-      });
-    }
-
-    await interaction.editReply({ embeds: [embed] });
+    await interaction.editReply({ embeds: [embed], components: [row] });
   },
 };
