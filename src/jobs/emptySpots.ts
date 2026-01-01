@@ -1,6 +1,11 @@
 import { ChannelType, type Client } from 'discord.js';
 import type { AppContext } from '../types.js';
-import { dbGetJobState, dbSetJobState, dbListSpotSubscribers } from '../db.js';
+import {
+  dbGetJobState,
+  dbSetJobState,
+  dbListSpotSubscribers,
+  dbUnsubscribeFromSpots,
+} from '../db.js';
 
 const MAX_CLAN_SIZE = 50;
 
@@ -34,13 +39,40 @@ export async function pollEmptySpotsOnce(ctx: AppContext, client: Client): Promi
   if (!ch || ch.type !== ChannelType.GuildText) return;
 
   const subscribers = dbListSpotSubscribers(ctx.db);
-  const mentions = subscribers.length ? subscribers.map((id) => `<@${id}>`).join(' ') : '';
+
+  // Only ping users who are still in the server and still have the vanquished role.
+  // Also clean up subscriptions for users who left the server, or who clearly have
+  // clan access again (i.e. they have a clan role).
+  const pingable: string[] = [];
+  for (const id of subscribers) {
+    const member = await guild.members.fetch(id).catch(() => null);
+    if (!member) {
+      dbUnsubscribeFromSpots(ctx.db, id);
+      continue;
+    }
+
+    const hasClanRole =
+      member.roles.cache.has(ctx.cfg.ROLE_MEMBER_ID) ||
+      member.roles.cache.has(ctx.cfg.ROLE_ELDER_ID) ||
+      member.roles.cache.has(ctx.cfg.ROLE_COLEADER_ID) ||
+      member.roles.cache.has(ctx.cfg.ROLE_LEADER_ID);
+    if (hasClanRole) {
+      dbUnsubscribeFromSpots(ctx.db, id);
+      continue;
+    }
+
+    if (member.roles.cache.has(ctx.cfg.ROLE_VANQUISHED_ID)) {
+      pingable.push(id);
+    }
+  }
+
+  const mentions = pingable.length ? pingable.map((id) => `<@${id}>`).join(' ') : '';
   const plural = openSlots === 1 ? '' : 's';
 
   await ch
     .send({
       content: `${mentions}${mentions ? '\n\n' : ''}Open clan spot detected: **${openSlots}** slot${plural} open.`,
-      allowedMentions: { users: subscribers },
+      allowedMentions: { users: pingable },
     })
     .catch(() => undefined);
 
