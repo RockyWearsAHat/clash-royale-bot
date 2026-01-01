@@ -19,7 +19,8 @@ import {
   repairVerificationThreadsOnce,
 } from './discord/join.js';
 import { WarLogsCommand, WarStatsCommand } from './discord/warstats.js';
-import { StatsCommand } from './discord/stats.js';
+import { handleWarlogsPublishButton } from './discord/warstats.js';
+import { StatsCommand, handleStatsPublishButton } from './discord/stats.js';
 import { NotifyNoMoreCommand, NotifyWhenSpotCommand } from './discord/spotNotify.js';
 import { startScheduler } from './jobs/scheduler.js';
 import { enforceChannelPermissions } from './discord/permissions.js';
@@ -109,6 +110,8 @@ client.on('interactionCreate', async (interaction) => {
     if (interaction.isButton()) {
       await handleLinkPreferenceInteraction(ctx, interaction);
       await handleProfileInteraction(ctx, interaction);
+      await handleStatsPublishButton(ctx, interaction);
+      await handleWarlogsPublishButton(ctx, interaction);
     }
 
     if (interaction.isModalSubmit()) {
