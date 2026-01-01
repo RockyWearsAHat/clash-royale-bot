@@ -6,6 +6,9 @@ export async function enforceChannelPermissions(ctx: AppContext, client: Client,
   if (!meUser) throw new Error('Client user not ready');
   const meMember = await guild.members.fetchMe();
 
+  // Note: @everyone role ID === guild ID.
+  const everyoneRoleId = guild.id;
+
   const general = await guild.channels.fetch(ctx.cfg.CHANNEL_GENERAL_ID).catch(() => null);
   const verification = await guild.channels
     .fetch(ctx.cfg.CHANNEL_VERIFICATION_ID)
@@ -14,6 +17,7 @@ export async function enforceChannelPermissions(ctx: AppContext, client: Client,
   const announcements = await guild.channels
     .fetch(ctx.cfg.CHANNEL_ANNOUNCEMENTS_ID)
     .catch(() => null);
+  const vanquished = await guild.channels.fetch(ctx.cfg.CHANNEL_VANQUISHED_ID).catch(() => null);
 
   const problems: string[] = [];
 
@@ -46,6 +50,8 @@ export async function enforceChannelPermissions(ctx: AppContext, client: Client,
     problems.push(
       `Announcements channel id not found in guild: ${ctx.cfg.CHANNEL_ANNOUNCEMENTS_ID}`,
     );
+  if (!vanquished)
+    problems.push(`Vanquished channel id not found in guild: ${ctx.cfg.CHANNEL_VANQUISHED_ID}`);
 
   // Verification (who-are-you): keep channel visible so private threads don't "vanish",
   // but prevent posting in the channel itself.
@@ -55,6 +61,16 @@ export async function enforceChannelPermissions(ctx: AppContext, client: Client,
       problems.push('Verification: bot lacks Manage Channels permission');
 
     if (canManageOverwrites(verification)) {
+      // Ensure unlinked users can access the verification channel + threads.
+      await safeEdit('Verification', verification, everyoneRoleId, {
+        ViewChannel: true,
+        ReadMessageHistory: true,
+        SendMessages: false,
+        CreatePublicThreads: false,
+        CreatePrivateThreads: false,
+        SendMessagesInThreads: true,
+      });
+
       // Allow clan roles + vanquished to view (needed to access private threads).
       for (const roleId of [
         ctx.cfg.ROLE_VANQUISHED_ID,
@@ -89,6 +105,11 @@ export async function enforceChannelPermissions(ctx: AppContext, client: Client,
       problems.push('General: bot lacks Manage Channels permission');
 
     if (canManageOverwrites(general)) {
+      // Lock out unlinked users (@everyone) from general.
+      await safeEdit('General', general, everyoneRoleId, {
+        ViewChannel: false,
+      });
+
       await safeEdit('General', general, ctx.cfg.ROLE_VANQUISHED_ID, {
         ViewChannel: false,
       });
@@ -124,8 +145,7 @@ export async function enforceChannelPermissions(ctx: AppContext, client: Client,
 
     if (canManageOverwrites(warLogs)) {
       // Hide war logs by default; grant access only to elder+.
-      // Note: @everyone role ID === guild ID.
-      await safeEdit('War logs', warLogs, guild.id, {
+      await safeEdit('War logs', warLogs, everyoneRoleId, {
         ViewChannel: false,
       });
 
@@ -172,15 +192,61 @@ export async function enforceChannelPermissions(ctx: AppContext, client: Client,
       problems.push('Announcements: bot lacks Manage Channels permission');
 
     if (canManageOverwrites(announcements)) {
+      // Ensure unlinked users can view announcements.
+      await safeEdit('Announcements', announcements, everyoneRoleId, {
+        ViewChannel: true,
+        ReadMessageHistory: true,
+      });
+
       await safeEdit('Announcements', announcements, meUser.id, {
         ViewChannel: true,
         ReadMessageHistory: true,
         SendMessages: true,
       });
+    }
+  }
 
-      // Do not force @everyone settings; leave server preference.
-      await safeEdit('Announcements', announcements, ctx.cfg.ROLE_VANQUISHED_ID, {
-        ViewChannel: false,
+  // Vanquished: unlinked users can view; clan roles cannot.
+  // Note: true Discord admins bypass overwrites and will still be able to view.
+  if (vanquished && vanquished.type === ChannelType.GuildText) {
+    if (!canView(vanquished)) problems.push('Vanquished: bot cannot view channel');
+    if (!canManageOverwrites(vanquished))
+      problems.push('Vanquished: bot lacks Manage Channels permission');
+
+    if (canManageOverwrites(vanquished)) {
+      // Allow unlinked users (no roles) to see vanquished.
+      await safeEdit('Vanquished', vanquished, everyoneRoleId, {
+        ViewChannel: true,
+        ReadMessageHistory: true,
+        SendMessages: true,
+        UseApplicationCommands: true,
+      });
+
+      // Keep all clan roles out (member/elder/co-leader/leader).
+      for (const roleId of [
+        ctx.cfg.ROLE_MEMBER_ID,
+        ctx.cfg.ROLE_ELDER_ID,
+        ctx.cfg.ROLE_COLEADER_ID,
+        ctx.cfg.ROLE_LEADER_ID,
+      ]) {
+        await safeEdit('Vanquished', vanquished, roleId, {
+          ViewChannel: false,
+        });
+      }
+
+      // Allow explicitly-vanquished users too.
+      await safeEdit('Vanquished', vanquished, ctx.cfg.ROLE_VANQUISHED_ID, {
+        ViewChannel: true,
+        ReadMessageHistory: true,
+        SendMessages: true,
+        UseApplicationCommands: true,
+      });
+
+      await safeEdit('Vanquished', vanquished, meUser.id, {
+        ViewChannel: true,
+        ReadMessageHistory: true,
+        SendMessages: true,
+        ManageMessages: true,
       });
     }
   }

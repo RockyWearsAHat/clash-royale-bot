@@ -3,10 +3,23 @@ import type { Client } from 'discord.js';
 import type { AppContext } from '../types.js';
 import { syncRolesOnce } from '../discord/roleSync.js';
 import { reconcileVerificationThreadForUser } from '../discord/join.js';
+import { enforceChannelPermissions } from '../discord/permissions.js';
 import { pollWarOnce } from './war.js';
 import { dbGetJobState, dbSetJobState } from '../db.js';
 
 export function startScheduler(ctx: AppContext, client: Client) {
+  cron.schedule(ctx.cfg.PERMISSIONS_ENFORCE_CRON, async () => {
+    try {
+      const guild = await client.guilds.fetch(ctx.cfg.GUILD_ID);
+      await enforceChannelPermissions(ctx, client, guild);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      ctx.db
+        .prepare('INSERT INTO audit_log(type, message) VALUES(?, ?)')
+        .run('perms_enforce_error', msg);
+    }
+  });
+
   cron.schedule(ctx.cfg.ROLE_SYNC_CRON, async () => {
     try {
       const guild = await client.guilds.fetch(ctx.cfg.GUILD_ID);

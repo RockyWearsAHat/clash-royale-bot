@@ -101,6 +101,20 @@ export async function syncRolesOnce(ctx: AppContext, guild: Guild) {
   }
 }
 
+export async function enforceUnlinkedMemberVanquished(ctx: AppContext, member: GuildMember) {
+  if (member.user.bot) return;
+  await applyMemberRoles(ctx, member, undefined);
+}
+
+export async function enforceLinkedMemberRoles(
+  ctx: AppContext,
+  member: GuildMember,
+  clanRole?: ClashClanMemberRole,
+) {
+  if (member.user.bot) return;
+  await applyMemberRoles(ctx, member, clanRole);
+}
+
 async function applyMemberRoles(
   ctx: AppContext,
   member: GuildMember,
