@@ -31,13 +31,26 @@ function encodeTag(tag: string): string {
   return encodeURIComponent(t);
 }
 
+function appendCacheBust(path: string): string {
+  const sep = path.includes('?') ? '&' : '?';
+  return `${path}${sep}_ts=${Date.now()}`;
+}
+
 export class ClashApi {
   constructor(private readonly token: string) {}
 
-  private async request<T>(path: string): Promise<T> {
-    const res = await fetch(`https://api.clashroyale.com/v1${path}`, {
+  private async request<T>(path: string, opts?: { cacheBust?: boolean }): Promise<T> {
+    const finalPath = opts?.cacheBust ? appendCacheBust(path) : path;
+    const res = await fetch(`https://api.clashroyale.com/v1${finalPath}`, {
+      cache: 'no-store',
       headers: {
         Authorization: `Bearer ${this.token}`,
+        ...(opts?.cacheBust
+          ? {
+              'Cache-Control': 'no-cache, no-store, max-age=0',
+              Pragma: 'no-cache',
+            }
+          : null),
       },
     });
 
@@ -63,13 +76,13 @@ export class ClashApi {
   }
 
   // Placeholder for war endpoints; will be used in later steps.
-  async getCurrentRiverRace(clanTag: string): Promise<any> {
+  async getCurrentRiverRace(clanTag: string, opts?: { cacheBust?: boolean }): Promise<any> {
     const tag = encodeTag(clanTag);
-    return await this.request<any>(`/clans/${tag}/currentriverrace`);
+    return await this.request<any>(`/clans/${tag}/currentriverrace`, opts);
   }
 
-  async getRiverRaceLog(clanTag: string): Promise<any> {
+  async getRiverRaceLog(clanTag: string, opts?: { cacheBust?: boolean }): Promise<any> {
     const tag = encodeTag(clanTag);
-    return await this.request<any>(`/clans/${tag}/riverracelog`);
+    return await this.request<any>(`/clans/${tag}/riverracelog`, opts);
   }
 }
