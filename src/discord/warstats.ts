@@ -638,8 +638,8 @@ async function renderWarStatsEmbeds(
   }
 
   const [payload, log, roster] = await Promise.all([
-    ctx.clash.getCurrentRiverRace(ctx.cfg.CLASH_CLAN_TAG),
-    ctx.clash.getRiverRaceLog(ctx.cfg.CLASH_CLAN_TAG),
+    ctx.clash.getCurrentRiverRace(ctx.cfg.CLASH_CLAN_TAG, { cacheBust: true }),
+    ctx.clash.getRiverRaceLog(ctx.cfg.CLASH_CLAN_TAG, { cacheBust: true }),
     ctx.clash.getClanMembers(ctx.cfg.CLASH_CLAN_TAG).catch(() => []),
   ]);
 
@@ -911,8 +911,8 @@ export const WarStatsCommand: SlashCommand = {
 
     // Fetch once for rendering + optional debug logs.
     const [payload, log, roster] = await Promise.all([
-      ctx.clash.getCurrentRiverRace(ctx.cfg.CLASH_CLAN_TAG),
-      ctx.clash.getRiverRaceLog(ctx.cfg.CLASH_CLAN_TAG),
+      ctx.clash.getCurrentRiverRace(ctx.cfg.CLASH_CLAN_TAG, { cacheBust: true }),
+      ctx.clash.getRiverRaceLog(ctx.cfg.CLASH_CLAN_TAG, { cacheBust: true }),
       ctx.clash.getClanMembers(ctx.cfg.CLASH_CLAN_TAG).catch(() => []),
     ]);
 
