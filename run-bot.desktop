@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Version=1.0
+Name=StupidDiscordBot
+Comment=Build and run the Discord bot
+Terminal=true
+Categories=Utility;
+Exec=bash -lc 'OS_NAME="$(uname -s 2>/dev/null || true)"; if [[ "$OS_NAME" != Linux* ]]; then echo "[run-bot] ERROR: This launcher is for Linux." 1>&2; echo "[run-bot] Detected: ${OS_NAME:-unknown}" 1>&2; echo "[run-bot] Use: run-bot.bat (Windows) | run-bot.command (macOS) | run-bot.sh (terminal)" 1>&2; exit 1; fi; DESKTOP_FILE="%k"; DESKTOP_FILE="${DESKTOP_FILE#file://}"; REPO_DIR="$(cd "$(dirname "$DESKTOP_FILE")" && pwd)"; cd "$REPO_DIR"; if ! command -v node >/dev/null 2>&1; then echo "[run-bot] ERROR: Node.js is not installed or not on PATH (requires Node >= 20)." 1>&2; exit 1; fi; node ./scripts/run-bot.mjs'
