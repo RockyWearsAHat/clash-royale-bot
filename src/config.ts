@@ -37,6 +37,7 @@ const EnvSchema = z.object({
 
   ROLE_SYNC_CRON: z.string().min(1).default('*/1 * * * *'),
   WAR_POLL_CRON: z.string().min(1).default('*/1 * * * *'),
+  EMPTY_SPOT_CRON: z.string().min(1).default('*/5 * * * *'),
 
   WARLOGS_DEBUG: z
     .enum(['true', 'false'])
@@ -47,11 +48,6 @@ const EnvSchema = z.object({
     .string()
     .optional()
     .transform((v) => v ?? ''),
-
-  PERMISSIONS_ENFORCE_ON_STARTUP: z
-    .enum(['true', 'false'])
-    .optional()
-    .transform((v) => (v ?? 'true') === 'true'),
 
   // If set, permissions will be enforced on a schedule (in addition to startup).
   // Keep this relatively infrequent to reduce Discord API churn.

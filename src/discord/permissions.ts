@@ -94,6 +94,10 @@ export async function enforceChannelPermissions(ctx: AppContext, client: Client,
         ReadMessageHistory: true,
         SendMessages: true,
         ManageMessages: true,
+        ManageThreads: true,
+        CreatePrivateThreads: true,
+        CreatePublicThreads: true,
+        SendMessagesInThreads: true,
       });
     }
   }
@@ -253,9 +257,7 @@ export async function enforceChannelPermissions(ctx: AppContext, client: Client,
 
   if (problems.length) {
     throw new Error(
-      `Cannot enforce channel permissions. Fix the following (or set PERMISSIONS_ENFORCE_ON_STARTUP=false):\n- ${problems.join(
-        '\n- ',
-      )}`,
+      `Cannot enforce channel permissions. Fix the following:\n- ${problems.join('\n- ')}`,
     );
   }
 }

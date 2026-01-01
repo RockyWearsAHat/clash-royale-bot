@@ -411,6 +411,39 @@ async function closeOtherThreadsForUser(
   dbSetJobState(ctx.db, `verify:thread:${userId}`, keepThreadId);
 }
 
+async function ensureThreadMember(
+  ctx: AppContext,
+  thread: ThreadChannel,
+  userId: string,
+): Promise<boolean> {
+  const isMember = async () =>
+    await thread.members
+      .fetch(userId)
+      .then(() => true)
+      .catch(() => false);
+
+  if (await isMember()) return true;
+
+  let lastErr: unknown = null;
+  for (let attempt = 1; attempt <= 3; attempt++) {
+    try {
+      await thread.members.add(userId);
+    } catch (e) {
+      lastErr = e;
+    }
+
+    await new Promise((r) => setTimeout(r, 250 * attempt));
+    if (await isMember()) return true;
+  }
+
+  const msg =
+    lastErr instanceof Error ? lastErr.message : lastErr ? String(lastErr) : 'Unknown error';
+  ctx.db
+    .prepare('INSERT INTO audit_log(type, message) VALUES(?, ?)')
+    .run('verify_thread_add_member_error', `user=${userId} thread=${thread.id} err=${msg}`);
+  return false;
+}
+
 async function renderOrUpdateProfileMessage(
   ctx: AppContext,
   thread: ThreadChannel,
@@ -750,7 +783,11 @@ async function getOrCreateVerificationThread(
       await existing.setName(desiredName).catch(() => undefined);
 
       // If the user left/was removed from the thread, re-add them so they can see it again.
-      await existing.members.add(userId).catch(() => undefined);
+      // IMPORTANT: only lock/archive other threads after we confirm this canonical thread is usable.
+      const ok = await ensureThreadMember(ctx, existing, userId);
+      if (ok) {
+        await closeOtherThreadsForUser(ctx, client, textChannel, userId, username, existing.id);
+      }
 
       // Ensure control message exists and thread is clean (best-effort).
       await renderOrUpdateProfileMessage(ctx, existing, userId);
@@ -769,13 +806,267 @@ async function getOrCreateVerificationThread(
   });
   dbSetJobState(ctx.db, stateKey, thread.id);
 
-  await closeOtherThreadsForUser(ctx, client, textChannel, userId, username, thread.id);
+  // IMPORTANT: ensure the user is actually a member before we lock/archive other candidate threads.
+  const ok = await ensureThreadMember(ctx, thread, userId);
+  if (ok) {
+    await closeOtherThreadsForUser(ctx, client, textChannel, userId, username, thread.id);
+  }
 
-  await thread.members.add(userId).catch(() => undefined);
   await renderOrUpdateProfileMessage(ctx, thread, userId);
   const uiId = dbGetJobState(ctx.db, `profile:uiMessage:${userId}`) ?? '';
   await cleanupThreadMessagesKeep(thread, [uiId]);
   return thread;
+}
+
+export async function repairVerificationThreadsOnce(ctx: AppContext, client: any): Promise<void> {
+  // Goal: cleanup/repair ONLY. No recreations.
+  // - Fix archived/locked state
+  // - Ensure user is a member of their canonical private thread
+  // - Archive/lock duplicate bot-managed threads
+  // - Delete orphan bot-only threads
+  // - Clear stale DB pointers
+  const channel = await client.channels.fetch(ctx.cfg.CHANNEL_VERIFICATION_ID).catch(() => null);
+  if (!channel || channel.type !== ChannelType.GuildText) return;
+  const textChannel = channel as TextChannel;
+
+  const linked = ctx.db
+    .prepare('SELECT discord_user_id, player_name FROM user_links')
+    .all() as Array<{ discord_user_id: string; player_name?: string | null }>;
+
+  const isBotManagedThreadName = (name: string | null | undefined) => {
+    const n = String(name ?? '').toLowerCase();
+    return n.startsWith('link-') || n.startsWith('setup necessary') || n.startsWith('profile -');
+  };
+
+  const botId = String(client.user?.id ?? '');
+  const listAllThreads = async (): Promise<ThreadChannel[]> => {
+    const byId = new Map<string, ThreadChannel>();
+
+    const active = await textChannel.threads.fetchActive().catch(() => null);
+    if (active?.threads?.values) {
+      for (const t of active.threads.values()) byId.set(t.id, t);
+    }
+
+    const fetchArchivedPaged = async (type: 'private' | 'public') => {
+      let before: string | undefined = undefined;
+      let pages = 0;
+      while (pages < 10) {
+        const res: any = await textChannel.threads
+          .fetchArchived({ type, limit: 100, before })
+          .catch(() => null);
+        if (!res) break;
+
+        const threads: any[] = Array.from(res.threads.values());
+        for (const t of threads) byId.set(t.id, t);
+
+        pages++;
+        if (!threads.length) break;
+        // Paginate by the oldest thread id we received.
+        before = String(threads[threads.length - 1]?.id ?? '');
+        const hasMore = Boolean((res as any)?.hasMore);
+        if (!hasMore) break;
+      }
+    };
+
+    await fetchArchivedPaged('private');
+    await fetchArchivedPaged('public');
+
+    return Array.from(byId.values());
+  };
+
+  // First pass: delete bot-only orphan threads (these are invisible to users and just clutter).
+  // Delete ANY thread under the verification channel whose ONLY member is the bot.
+  if (botId) {
+    const candidates = await listAllThreads();
+
+    for (const t of candidates) {
+      // Try to determine if this thread is bot-only.
+      // For some private threads, member fetch can fail or be incomplete; fall back to memberCount.
+      let isBotOnly = false;
+      const members = await t.members.fetch().catch(() => null);
+      if (members) {
+        // Some APIs occasionally return an empty collection; treat that as bot-only-ish for bot-managed names.
+        if (members.size === 0) {
+          isBotOnly = isBotManagedThreadName(t.name);
+        } else {
+          isBotOnly = members.size === 1 && members.has(botId);
+        }
+      } else {
+        const mc = Number((t as any)?.memberCount ?? NaN);
+        // If we can't fetch members but Discord says only 1 member, and it looks bot-managed,
+        // treat it as an orphan candidate.
+        isBotOnly = Number.isFinite(mc) && mc === 1 && isBotManagedThreadName(t.name);
+      }
+
+      if (!isBotOnly) continue;
+
+      // Best-effort deletion; fall back to archive+lock if guild disallows deletes.
+      try {
+        await t.delete('Repair pass: deleting bot-only orphan thread');
+      } catch (e) {
+        await t
+          .setLocked(true, 'Repair pass: locking bot-only orphan thread (delete failed)')
+          .catch(() => undefined);
+        await t
+          .setArchived(true, 'Repair pass: archiving bot-only orphan thread (delete failed)')
+          .catch(() => undefined);
+        const msg = e instanceof Error ? e.message : String(e);
+        ctx.db
+          .prepare('INSERT INTO audit_log(type, message) VALUES(?, ?)')
+          .run('verify_thread_orphan_delete_failed', `thread=${t.id} err=${msg}`);
+      }
+
+      await new Promise((r) => setTimeout(r, 150));
+    }
+  }
+
+  // Second pass: validate every stored verify:thread pointer (covers linked + unlinked users).
+  // If the pointer thread exists but the user isn't in it (and cannot be re-added), delete it and clear the pointer.
+  const pointers = ctx.db
+    .prepare("SELECT key, value FROM job_state WHERE key LIKE 'verify:thread:%'")
+    .all() as Array<{ key: string; value: string }>;
+  for (const p of pointers) {
+    const userId = p.key.split(':').slice(2).join(':');
+    const threadId = String(p.value ?? '');
+    if (!userId || !threadId) continue;
+
+    const t = await textChannel.threads.fetch(threadId).catch(() => null);
+    if (!t) {
+      dbDeleteJobState(ctx.db, p.key);
+      continue;
+    }
+
+    // If the user is already a member, leave it alone.
+    const isMember = await t.members
+      .fetch(userId)
+      .then(() => true)
+      .catch(() => false);
+    if (isMember) continue;
+
+    // Attempt to re-add them.
+    const ok = await ensureThreadMember(ctx, t, userId);
+    if (ok) continue;
+
+    // Still not accessible: delete/lock/archive and clear pointer to prevent persistent bot-only threads.
+    try {
+      await t.delete('Repair pass: deleting unusable thread (cannot add user)');
+    } catch {
+      await t
+        .setLocked(true, 'Repair pass: locking unusable thread (delete failed)')
+        .catch(() => undefined);
+      await t
+        .setArchived(true, 'Repair pass: archiving unusable thread (delete failed)')
+        .catch(() => undefined);
+    }
+    dbDeleteJobState(ctx.db, p.key);
+
+    await new Promise((r) => setTimeout(r, 150));
+  }
+
+  for (const row of linked) {
+    const userId = row.discord_user_id;
+    const user = await client.users.fetch(userId).catch(() => null);
+    const username = user?.username ?? 'Discord Username';
+
+    const stateKey = `verify:thread:${userId}`;
+    const existingId = dbGetJobState(ctx.db, stateKey);
+
+    const fetchThreadById = async (id: string): Promise<ThreadChannel | null> => {
+      if (!id) return null;
+      return await textChannel.threads.fetch(id).catch(() => null);
+    };
+
+    let thread: ThreadChannel | null = existingId ? await fetchThreadById(existingId) : null;
+
+    // If pointer is missing or stale, attempt to select an existing bot-managed thread.
+    if (!thread) {
+      if (existingId) {
+        ctx.db
+          .prepare('INSERT INTO audit_log(type, message) VALUES(?, ?)')
+          .run('verify_thread_pointer_stale', `user=${userId} thread=${existingId}`);
+        dbDeleteJobState(ctx.db, stateKey);
+      }
+
+      const candidates = await listAllThreads();
+
+      const uname = username.toLowerCase();
+      const legacyNameMatchesUser = (name: string) => {
+        const n = name.toLowerCase();
+        return n.startsWith('link-') && n.includes(uname);
+      };
+
+      const scored = [] as Array<{ t: ThreadChannel; score: number; ts: number }>;
+      for (const t of candidates) {
+        if (!isBotManagedThreadName(t.name)) continue;
+
+        const isMember = await t.members
+          .fetch(userId)
+          .then(() => true)
+          .catch(() => false);
+        const legacy = !isMember && legacyNameMatchesUser(t.name ?? '');
+        if (!isMember && !legacy) continue;
+
+        const base = isMember ? 2 : 1;
+        const bonus = t.archived ? 0 : 1;
+        scored.push({ t, score: base + bonus, ts: (t as any).createdTimestamp ?? 0 });
+      }
+
+      scored.sort((a, b) => b.score - a.score || b.ts - a.ts);
+      thread = scored[0]?.t ?? null;
+
+      if (thread) {
+        dbSetJobState(ctx.db, stateKey, thread.id);
+      } else {
+        // Nothing to repair for this user.
+        await new Promise((r) => setTimeout(r, 75));
+        continue;
+      }
+    }
+
+    // Repair the canonical thread in-place.
+    if (thread.archived) {
+      await thread
+        .setArchived(false, 'Repairing verification/profile thread')
+        .catch(() => undefined);
+    }
+    if (thread.locked) {
+      await thread.setLocked(false, 'Repairing verification/profile thread').catch(() => undefined);
+    }
+
+    const desiredName = `Profile - ${row.player_name ?? username}`.slice(0, 90);
+    if (thread.name !== desiredName) {
+      await thread.setName(desiredName).catch(() => undefined);
+    }
+
+    const ok = await ensureThreadMember(ctx, thread, userId);
+    if (ok) {
+      await closeOtherThreadsForUser(ctx, client, textChannel, userId, username, thread.id);
+    } else {
+      // If we couldn't add the user back, this thread is effectively unusable for them.
+      // Delete it if possible so we don't accumulate bot-only threads tied to users.
+      try {
+        await thread.delete('Repair pass: deleting unusable bot-only thread (could not add user)');
+      } catch {
+        await thread
+          .setLocked(true, 'Repair pass: locking unusable thread (delete failed)')
+          .catch(() => undefined);
+        await thread
+          .setArchived(true, 'Repair pass: archiving unusable thread (delete failed)')
+          .catch(() => undefined);
+      }
+
+      dbDeleteJobState(ctx.db, stateKey);
+      await new Promise((r) => setTimeout(r, 150));
+      continue;
+    }
+
+    // Best-effort: ensure UI is present and keep the thread clean.
+    await renderOrUpdateProfileMessage(ctx, thread, userId);
+    const uiId = dbGetJobState(ctx.db, `profile:uiMessage:${userId}`) ?? '';
+    await cleanupThreadMessagesKeep(thread, [uiId]);
+
+    await new Promise((r) => setTimeout(r, 150));
+  }
 }
 
 export async function reconcileVerificationThreadForUser(
@@ -815,13 +1106,15 @@ export async function reconcileVerificationThreadForUser(
         await existing.setName(desiredName).catch(() => undefined);
       }
 
-      // Only re-add the user if they are not currently a member of the thread.
+      // Ensure the user can access the thread again if they were removed.
+      // Use the same canonical create-or-repair logic so errors get audited.
       const isMember = await existing.members
         .fetch(userId)
         .then(() => true)
         .catch(() => false);
       if (!isMember) {
-        await existing.members.add(userId).catch(() => undefined);
+        await getOrCreateVerificationThread(ctx, client, userId);
+        return;
       }
 
       // Ensure the parent-channel overwrite doesn't accidentally hide the thread.
