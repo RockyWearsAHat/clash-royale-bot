@@ -21,7 +21,6 @@ import {
 import { WarLogsCommand, WarStatsCommand } from './discord/warstats.js';
 import { handleWarlogsPublishButton } from './discord/warstats.js';
 import { StatsCommand, handleStatsPublishButton } from './discord/stats.js';
-import { RetryLastSnapshotCommand } from './discord/retryLastSnapshot.js';
 import { NotifyNoMoreCommand, NotifyWhenSpotCommand } from './discord/spotNotify.js';
 import { startScheduler } from './jobs/scheduler.js';
 import { enforceChannelPermissions } from './discord/permissions.js';
@@ -52,7 +51,6 @@ registerHandlers(client, ctx, [
   StatsCommand,
   WarStatsCommand,
   WarLogsCommand,
-  RetryLastSnapshotCommand,
   NotifyWhenSpotCommand,
   NotifyNoMoreCommand,
 ]);

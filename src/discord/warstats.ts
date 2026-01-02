@@ -868,7 +868,9 @@ function renderWarStatsEmbedsFromData(
     .slice(1)
     .map((extra) => infoEmbed('Participation — Continued', extra));
 
-  return { ok: true, firstEmbeds: [embed, firstParticipation], continuationEmbeds };
+  const shouldHideOverview = Boolean(dayArgRaw);
+  const firstEmbeds = shouldHideOverview ? [firstParticipation] : [embed, firstParticipation];
+  return { ok: true, firstEmbeds, continuationEmbeds };
 }
 
 async function renderWarStatsEmbeds(
