@@ -3,6 +3,7 @@ import type { Client } from 'discord.js';
 import type { AppContext } from '../types.js';
 import { dbGetJobState, dbInsertWarHistoryIfMissing, dbSetJobState } from '../db.js';
 import { renderWarLogsEmbedsForSnapshot } from '../discord/warstats.js';
+import { getZonedYmdHm, parseTimeOfDayWithTimeZone } from '../time.js';
 
 type ParticipantSnapshot = {
   decksUsed?: number;
@@ -575,6 +576,36 @@ export async function pollWarOnce(ctx: AppContext, client: Client) {
               allowedMentions: { parse: ['everyone'] },
             })
             .catch(() => undefined);
+        }
+      }
+    }
+  }
+
+  // Optional: time-based war-day reminder announcement.
+  // Posts at the configured local time once per local date (in the specified timezone).
+  if (ctx.cfg.WAR_DAY_NOTIFICATION_TIME) {
+    const parsed = parseTimeOfDayWithTimeZone(ctx.cfg.WAR_DAY_NOTIFICATION_TIME);
+    if (parsed.ok && isBattleDay) {
+      const now = new Date();
+      const zoned = getZonedYmdHm(now, parsed.value.timeZone);
+
+      if (zoned.hour === parsed.value.hour && zoned.minute === parsed.value.minute) {
+        const lastDateKey = 'war:war_day_notification:last_date';
+        const lastDate = dbGetJobState(ctx.db, lastDateKey);
+        if (lastDate !== zoned.ymd) {
+          const ann = await guild.channels.fetch(ctx.cfg.CHANNEL_ANNOUNCEMENTS_ID);
+          if (ann && ann.type === ChannelType.GuildText) {
+            const idx = inferWarDayIndex(payload, next);
+            const dayLabel = Number.isFinite(idx) ? ` (Day ${idx})` : '';
+            await ann
+              .send({
+                content: `@everyone War reminder${dayLabel} — do your battles.`,
+                allowedMentions: { parse: ['everyone'] },
+              })
+              .catch(() => undefined);
+            dbSetJobState(ctx.db, lastDateKey, zoned.ymd);
+            dbSetJobState(ctx.db, 'war:war_day_notification:last_sent_at', now.toISOString());
+          }
         }
       }
     }
