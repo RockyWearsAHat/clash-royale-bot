@@ -399,12 +399,22 @@ async function closeOtherThreadsForUser(
     if (!isMember && !legacyNameMatchesUser(t.name ?? '')) continue;
 
     // Duplicates can happen due to old versions or manual actions.
-    // Do NOT delete by default (it can feel like threads "randomly disappear").
-    // Instead, archive+lock so history remains and the canonical thread stays stable.
-    await t.setLocked(true, 'Closing duplicate verification/profile thread').catch(() => undefined);
-    await t
-      .setArchived(true, 'Closing duplicate verification/profile thread')
-      .catch(() => undefined);
+    // Per server policy: duplicates must be deleted so there is always exactly one thread per user.
+    try {
+      await t.delete('Deleting duplicate verification/profile thread');
+    } catch (e) {
+      // If delete is disallowed, lock+archive as a fallback.
+      await t
+        .setLocked(true, 'Closing duplicate verification/profile thread (delete failed)')
+        .catch(() => undefined);
+      await t
+        .setArchived(true, 'Closing duplicate verification/profile thread (delete failed)')
+        .catch(() => undefined);
+      const msg = e instanceof Error ? e.message : String(e);
+      ctx.db
+        .prepare('INSERT INTO audit_log(type, message) VALUES(?, ?)')
+        .run('verify_thread_duplicate_delete_failed', `user=${userId} thread=${t.id} err=${msg}`);
+    }
   }
 
   // Also clear any stale state pointing at something else.
@@ -753,8 +763,6 @@ async function getOrCreateVerificationThread(
           .setLocked(false, 'Re-opening verification/profile thread')
           .catch(() => undefined);
       }
-      await closeOtherThreadsForUser(ctx, client, textChannel, userId, username, existing.id);
-
       // Keep the setup thread name consistent (even if it was created earlier with a different name).
       await existing.setName(desiredName).catch(() => undefined);
 
@@ -1059,6 +1067,9 @@ export async function reconcileVerificationThreadForUser(
   if (!channel || channel.type !== ChannelType.GuildText) return;
   const textChannel = channel as TextChannel;
 
+  const user = await client.users.fetch(userId).catch(() => null);
+  const username = user?.username ?? 'Discord Username';
+
   const stateKey = `verify:thread:${userId}`;
   const existingId = dbGetJobState(ctx.db, stateKey);
   if (existingId) {
@@ -1092,6 +1103,9 @@ export async function reconcileVerificationThreadForUser(
         await getOrCreateVerificationThread(ctx, client, userId);
         return;
       }
+
+      // Canonical thread is usable; enforce uniqueness by deleting any duplicates.
+      await closeOtherThreadsForUser(ctx, client, textChannel, userId, username, existing.id);
       return;
     }
   }
