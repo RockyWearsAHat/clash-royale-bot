@@ -1,5 +1,6 @@
 import 'dotenv/config';
 import { z } from 'zod';
+import { parseTimeOfDayWithTimeZone } from './time.js';
 
 const EnvSchema = z
   .object({
@@ -44,6 +45,23 @@ const EnvSchema = z
     ROLE_SYNC_CRON: z.string().min(1).default('*/1 * * * *'),
     WAR_POLL_CRON: z.string().min(1).default('*/1 * * * *'),
     EMPTY_SPOT_CRON: z.string().min(1).default('*/5 * * * *'),
+
+    // Optional: post a war reminder at an exact time in the announcements channel.
+    // Examples: "8am MST", "9pm Pacific", "08:30 America/Denver"
+    WAR_DAY_NOTIFICATION_TIME: z
+      .string()
+      .min(1)
+      .optional()
+      .superRefine((v, ctx) => {
+        if (!v) return;
+        const parsed = parseTimeOfDayWithTimeZone(v);
+        if (!parsed.ok) {
+          ctx.addIssue({
+            code: z.ZodIssueCode.custom,
+            message: parsed.error,
+          });
+        }
+      }),
 
     // If set, permissions will be enforced on a schedule (in addition to startup).
     // Keep this relatively infrequent to reduce Discord API churn.
