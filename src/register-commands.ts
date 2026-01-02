@@ -2,6 +2,7 @@ import { REST, Routes } from 'discord.js';
 import { loadConfig } from './config.js';
 import { WarLogsCommand, WarStatsCommand } from './discord/warstats.js';
 import { StatsCommand } from './discord/stats.js';
+import { RetryLastSnapshotCommand } from './discord/retryLastSnapshot.js';
 import { NotifyNoMoreCommand, NotifyWhenSpotCommand } from './discord/spotNotify.js';
 import http from 'node:http';
 import { randomBytes } from 'node:crypto';
@@ -12,6 +13,7 @@ const commands = [
   StatsCommand.data,
   WarStatsCommand.data,
   WarLogsCommand.data,
+  RetryLastSnapshotCommand.data,
   NotifyWhenSpotCommand.data,
   NotifyNoMoreCommand.data,
 ].map((c) => c.toJSON());

@@ -1,10 +1,12 @@
-import { ChannelType, EmbedBuilder } from 'discord.js';
+import { ChannelType } from 'discord.js';
 import type { Client } from 'discord.js';
 import type { AppContext } from '../types.js';
 import { dbGetJobState, dbInsertWarHistoryIfMissing, dbSetJobState } from '../db.js';
+import { renderWarLogsEmbedsForSnapshot } from '../discord/warstats.js';
 
 type ParticipantSnapshot = {
   decksUsed?: number;
+  decksUsedToday?: number;
   fame?: number;
   repairs?: number;
   boatAttacks?: number;
@@ -12,7 +14,7 @@ type ParticipantSnapshot = {
 };
 
 type WarDaySnapshotHistoryEntry = {
-  key: string; // e.g. warDay:<periodEndTime>
+  key: string;
   endRaw: string;
   endAtIso: string;
   capturedAtIso: string;
@@ -21,41 +23,8 @@ type WarDaySnapshotHistoryEntry = {
   snapshot: Record<string, ParticipantSnapshot>;
 };
 
-const scheduledWarDaySnapshots = new Map<string, NodeJS.Timeout>();
-
-let currentWarEndpointState: 'unknown' | 'gone' | 'ok' = 'unknown';
-let currentWarGoneLogged = false;
-
-function isCurrentWarGoneError(err: unknown): boolean {
-  const msg = typeof (err as any)?.message === 'string' ? (err as any).message : String(err);
-  return (
-    /Clash API error\s+410\s+Gone/i.test(msg) || /endpoint has been permanently removed/i.test(msg)
-  );
-}
-
-async function tryGetCurrentWarEndTime(
-  ctx: AppContext,
-): Promise<{ raw?: string; at?: Date } | null> {
-  if (currentWarEndpointState === 'gone') return null;
-
-  try {
-    const currentWar = await ctx.clash.getCurrentWar(ctx.cfg.CLASH_CLAN_TAG, { cacheBust: true });
-    currentWarEndpointState = 'ok';
-    const t = findWarEndTimeFromCurrentWar(currentWar);
-    return t.raw && t.at ? t : null;
-  } catch (err) {
-    if (isCurrentWarGoneError(err)) {
-      currentWarEndpointState = 'gone';
-      if (!currentWarGoneLogged) {
-        currentWarGoneLogged = true;
-        console.log(
-          '[war] Note: Clash removed /currentwar (410 Gone). End-time scheduling will rely on river race end fields when present, otherwise rollover snapshots.',
-        );
-      }
-    }
-    return null;
-  }
-}
+// Snapshot strategy: capture minute snapshots and post the final snapshot when a
+// period change is detected (rollover). No timing-based scheduling.
 
 function clampNonNegative(n: number): number {
   return Number.isFinite(n) && n > 0 ? n : 0;
@@ -129,15 +98,24 @@ function extractParticipants(payload: any): Map<string, ParticipantSnapshot> {
     const tag = normalizeTagUpper(p?.tag ?? p?.playerTag ?? p?.memberTag);
     if (!tag) continue;
 
+    const decksUsedToday = pickMaxNumber(p, [
+      'decksUsedToday',
+      'decksUsedThisDay',
+      'decksUsedInDay',
+      'decksUsedThisPeriodToday',
+    ]);
+
+    const decksUsedOverall = pickMaxNumber(p, [
+      'decksUsedThisPeriod',
+      'decksUsedInPeriod',
+      'decksUsed',
+      'decksUsedThisSection',
+      'decksUsedInSection',
+    ]);
+
     out.set(tag, {
-      decksUsed: pickMaxNumber(p, [
-        'decksUsed',
-        'decksUsedToday',
-        'decksUsedThisDay',
-        'decksUsedThisPeriod',
-        'decksUsedInPeriod',
-        'decksUsedInDay',
-      ]),
+      decksUsed: decksUsedOverall ?? decksUsedToday,
+      decksUsedToday,
       fame: pickMaxNumber(p, ['fame', 'fameToday', 'currentFame']),
       repairs: pickMaxNumber(p, ['repairs', 'repairsToday', 'repairPoints', 'repairPointsToday']),
       boatAttacks: pickMaxNumber(p, ['boatAttacks', 'boatAttacksToday']),
@@ -145,47 +123,6 @@ function extractParticipants(payload: any): Map<string, ParticipantSnapshot> {
     });
   }
   return out;
-}
-
-function parseClashApiTime(raw: unknown): Date | null {
-  const s = typeof raw === 'string' ? raw.trim() : '';
-  if (!s) return null;
-
-  // Clash often uses e.g. 20240101T235959.000Z
-  const m = s.match(/^(\d{4})(\d{2})(\d{2})T(\d{2})(\d{2})(\d{2})(?:\.\d+)?Z$/);
-  if (m) {
-    const [, yy, mo, dd, hh, mm, ss] = m;
-    const iso = `${yy}-${mo}-${dd}T${hh}:${mm}:${ss}Z`;
-    const d = new Date(iso);
-    return Number.isFinite(d.getTime()) ? d : null;
-  }
-
-  const d = new Date(s);
-  return Number.isFinite(d.getTime()) ? d : null;
-}
-
-function findPeriodEndTime(payload: any): { raw?: string; at?: Date } {
-  const raw =
-    (typeof payload?.periodEndTime === 'string' && payload.periodEndTime) ||
-    (typeof payload?.sectionEndTime === 'string' && payload.sectionEndTime) ||
-    (typeof payload?.endTime === 'string' && payload.endTime) ||
-    undefined;
-  const at = parseClashApiTime(raw);
-  return { raw, at: at ?? undefined };
-}
-
-function findWarEndTimeFromCurrentWar(payload: any): { raw?: string; at?: Date } {
-  const raw =
-    typeof payload?.warEndTime === 'string' && payload.warEndTime ? payload.warEndTime : undefined;
-  const at = parseClashApiTime(raw);
-  return { raw, at: at ?? undefined };
-}
-
-function formatDurationHhMm(ms: number): string {
-  const totalSec = Math.max(0, Math.trunc(ms / 1000));
-  const hh = Math.trunc(totalSec / 3600);
-  const mm = Math.trunc((totalSec % 3600) / 60);
-  return `${String(hh).padStart(2, '0')}h${String(mm).padStart(2, '0')}m`;
 }
 
 function toLocalDateTimeLabel(d: Date): string {
@@ -196,49 +133,16 @@ function toLocalDateTimeLabel(d: Date): string {
   }
 }
 
-function inferEndAtFromLastSnapshotKey(ctx: AppContext, nowMs = Date.now()): Date | undefined {
-  const prevKey = dbGetJobState(ctx.db, 'war:day_snapshot:last_key');
-  if (!prevKey || typeof prevKey !== 'string') return undefined;
-  const m = prevKey.match(/^warDay:(.+)$/);
-  if (!m) return undefined;
-  const prevAt = parseClashApiTime(m[1]);
-  if (!prevAt) return undefined;
-
-  const nextAt = new Date(prevAt.getTime() + 24 * 60 * 60 * 1000);
-  const nextMs = nextAt.getTime();
-  if (!Number.isFinite(nextMs)) return undefined;
-
-  // Only accept if plausibly upcoming (avoid scheduling far in the future/past).
-  const minMs = nowMs + 5 * 60_000;
-  const maxMs = nowMs + 36 * 60 * 60_000;
-  if (nextMs < minMs || nextMs > maxMs) return undefined;
-  return nextAt;
-}
-
-function inferResetTimeUtc(cfg: AppContext['cfg'], nowMs = Date.now()): Date | undefined {
-  const hhmm =
-    typeof (cfg as any).WAR_DAY_RESET_UTC === 'string' ? (cfg as any).WAR_DAY_RESET_UTC : undefined;
-  if (!hhmm) return undefined;
-
-  const [hhStr, mmStr] = hhmm.split(':');
-  const hh = Number(hhStr);
-  const mm = Number(mmStr);
-
-  const now = new Date(nowMs);
-  const y = now.getUTCFullYear();
-  const m = now.getUTCMonth();
-  const d = now.getUTCDate();
-
-  let reset = new Date(Date.UTC(y, m, d, hh, mm, 0, 0));
-  if (reset.getTime() <= nowMs) reset = new Date(Date.UTC(y, m, d + 1, hh, mm, 0, 0));
-  return reset;
-}
-
-function currentPeriodKey(payload: any): string {
+function currentPeriodKey(payload: any, participants?: Map<string, ParticipantSnapshot>): string {
   const periodTypeRaw = typeof payload?.periodType === 'string' ? payload.periodType : undefined;
   const periodType = periodTypeRaw?.trim().toLowerCase() || 'unknown';
   const sectionIndex = toFiniteInt(payload?.sectionIndex);
-  const dayIndex = toFiniteInt(payload?.dayIndex) ?? toFiniteInt(payload?.warDay);
+  const directDayIndex = toFiniteInt(payload?.dayIndex) ?? toFiniteInt(payload?.warDay);
+  const inferredDayIndex =
+    directDayIndex === undefined && participants
+      ? inferWarDayIndex(payload, participants)
+      : undefined;
+  const dayIndex = directDayIndex ?? inferredDayIndex;
   // Keep this stable across payload variants while still changing when the day changes.
   return `${periodType}:${sectionIndex ?? 'na'}:${dayIndex ?? 'na'}`;
 }
@@ -276,86 +180,52 @@ async function postWarDaySnapshotFromCaptured(
 
   if (!isRegularWarBattleDay(payload)) return;
 
-  const prevRaw = dbGetJobState(ctx.db, 'war:day_snapshot:last_snapshot');
-  const prev = new Map<string, ParticipantSnapshot>();
-  if (prevRaw) {
-    try {
-      const obj = JSON.parse(prevRaw) as Record<string, ParticipantSnapshot>;
-      for (const [tag, snap] of Object.entries(obj)) {
-        const norm = normalizeTagUpper(tag);
-        if (norm) prev.set(norm, snap);
-      }
-    } catch {
-      // ignore
-    }
-  }
-
   const roster = await ctx.clash.getClanMembers(ctx.cfg.CLASH_CLAN_TAG).catch(() => []);
-  const nameByTag = new Map<string, string>();
-  for (const m of roster) {
-    const tag = normalizeTagUpper(m.tag);
-    if (tag) nameByTag.set(tag, m.name);
-  }
+  const log = await ctx.clash.getRiverRaceLog(ctx.cfg.CLASH_CLAN_TAG).catch(() => null);
+  const snapshot = serializeParticipants(current);
+  const payloadDayIndex = inferWarDayIndex(payload, current);
+  const periodType = typeof payload?.periodType === 'string' ? payload.periodType : undefined;
 
-  const tags = roster.length
-    ? roster.map((m) => normalizeTagUpper(m.tag)).filter((t): t is string => Boolean(t))
-    : Array.from(current.keys());
-  const scored = tags.map((tag) => {
-    const before = prev.get(tag) ?? {};
-    const after = current.get(tag) ?? {};
-    const dFame = clampNonNegative((after.fame ?? 0) - (before.fame ?? 0));
-    const dDecks = clampNonNegative((after.decksUsed ?? 0) - (before.decksUsed ?? 0));
-    return { tag, dFame, dDecks };
-  });
+  const render = await renderWarLogsEmbedsForSnapshot(
+    ctx,
+    {
+      payload,
+      log,
+      roster,
+      snapshot,
+      snapshotEndAt: endAt,
+      warDayIndex: payloadDayIndex,
+      periodType,
+    },
+    { includeRecord: false },
+  );
 
-  scored.sort((a, b) => b.dFame - a.dFame || b.dDecks - a.dDecks || a.tag.localeCompare(b.tag));
+  if (!render.ok) {
+    // Fail softly; this should never block future snapshots.
+    const msg = render.errorEmbeds?.[0] ? 'War logs unavailable' : 'War logs unavailable';
+    await channel.send({ content: msg }).catch(() => undefined);
+  } else {
+    const filteredFirst = (render.firstEmbeds ?? []).filter((e) => {
+      try {
+        const title = (e as any)?.toJSON?.()?.title ?? '';
+        return String(title) !== 'War Overview';
+      } catch {
+        return true;
+      }
+    });
 
-  const lines: string[] = [];
-  const noBattles: string[] = [];
-  for (const { tag, dFame, dDecks } of scored) {
-    const name = nameByTag.get(tag) ?? tag;
-    lines.push(`• **${name}**: ${dFame} points`);
-    if (dDecks <= 0 && dFame <= 0) noBattles.push(`${name}`);
-  }
-
-  const header = `War day snapshot (ending ${endAt.toLocaleString()}):`;
-  const chunks = chunkEmbedDescriptions([`**${header}**`, ...lines]);
-
-  const starter = await channel.send({ content: header }).catch(() => null);
-  const thread = starter
-    ? await starter
-        .startThread({
-          name: `War day summary — ${endAt.toLocaleDateString()}`,
-          autoArchiveDuration: 1440,
-          reason: 'War day snapshot thread',
-        })
-        .catch(() => null)
-    : null;
-  const target: any = thread ?? channel;
-
-  const noBattlesText = noBattles.length
-    ? noBattles.length > 40
-      ? `${noBattles.slice(0, 40).join(', ')} … (+${noBattles.length - 40} more)`
-      : noBattles.join(', ')
-    : '(none)';
-
-  const ts = new Date();
-  for (let i = 0; i < chunks.length; i += 1) {
-    const embed = new EmbedBuilder()
-      .setTitle('War Day Summary')
-      .setDescription(chunks[i])
-      .setFooter({ text: ts.toLocaleString() });
-    if (i === 0) embed.addFields({ name: 'No battles', value: noBattlesText });
-    if (chunks.length > 1) embed.setAuthor({ name: `Part ${i + 1} of ${chunks.length}` });
-    await target.send({ embeds: [embed] }).catch(() => undefined);
+    if (filteredFirst.length) {
+      await channel.send({ embeds: filteredFirst }).catch(() => undefined);
+    }
+    for (const e of render.continuationEmbeds) {
+      await channel.send({ embeds: [e] }).catch(() => undefined);
+    }
   }
 
   const serialized = serializeParticipants(current);
   dbSetJobState(ctx.db, 'war:day_snapshot:last_snapshot', JSON.stringify(serialized));
   dbSetJobState(ctx.db, snapshotKey, key);
 
-  const payloadDayIndex = inferWarDayIndex(payload, current);
-  const periodType = typeof payload?.periodType === 'string' ? payload.periodType : undefined;
   appendSnapshotHistory(ctx, {
     key,
     endRaw: endAt.toISOString(),
@@ -373,7 +243,7 @@ async function maybePostSnapshotOnPeriodChange(
   payload: any,
   current: Map<string, ParticipantSnapshot>,
 ) {
-  const keyNow = currentPeriodKey(payload);
+  const keyNow = currentPeriodKey(payload, current);
   const lastKey = dbGetJobState(ctx.db, 'war:period:last_key');
   const lastCaptureRaw = dbGetJobState(ctx.db, 'war:period:last_capture');
 
@@ -399,16 +269,51 @@ async function maybePostSnapshotOnPeriodChange(
           periodType: parsed.periodType,
           sectionIndex: parsed.sectionIndex,
         };
-        const snapshotKey = `warDay:${parsed.periodKey}`;
-        console.log(
-          `[war] Period changed (${String(lastKey)} -> ${keyNow}); posting rollover snapshot for previous periodKey=${parsed.periodKey} atLocal=${toLocalDateTimeLabel(capturedAt)}`,
-        );
-        await postWarDaySnapshotFromCaptured(ctx, client, {
-          key: snapshotKey,
-          endAt: capturedAt,
-          payload: prevPayload,
-          current: prevMap,
-        });
+
+        // Guard: during upgrades, older versions stored period keys without a day index (":na").
+        // When we introduce inferred-day keys, we can observe a synthetic "period change" even though
+        // we haven't actually crossed a real day boundary. Avoid posting a bogus snapshot in that case.
+        const prevDay = inferWarDayIndex(prevPayload, prevMap);
+        const nowDay = inferWarDayIndex(payload, current);
+        const prevSection = toFiniteInt((prevPayload as any)?.sectionIndex);
+        const nowSection = toFiniteInt(payload?.sectionIndex);
+        const prevPt =
+          typeof (prevPayload as any)?.periodType === 'string'
+            ? String((prevPayload as any).periodType)
+                .trim()
+                .toLowerCase()
+            : typeof parsed.periodType === 'string'
+              ? String(parsed.periodType).trim().toLowerCase()
+              : undefined;
+        const nowPt =
+          typeof payload?.periodType === 'string'
+            ? payload.periodType.trim().toLowerCase()
+            : undefined;
+
+        const isKeyMigrationOnly =
+          String(lastKey).endsWith(':na') &&
+          prevDay !== undefined &&
+          nowDay !== undefined &&
+          prevDay === nowDay &&
+          (prevSection ?? 'na') === (nowSection ?? 'na') &&
+          (prevPt ?? 'na') === (nowPt ?? 'na');
+
+        if (isKeyMigrationOnly) {
+          console.log(
+            `[war] Period key changed due to inferred-day upgrade (${String(lastKey)} -> ${keyNow}); skipping snapshot post (still dayIndex=${nowDay}).`,
+          );
+        } else {
+          const snapshotKey = `warDay:${parsed.periodKey}`;
+          console.log(
+            `[war] Period changed (${String(lastKey)} -> ${keyNow}); posting rollover snapshot for previous periodKey=${parsed.periodKey} atLocal=${toLocalDateTimeLabel(capturedAt)}`,
+          );
+          await postWarDaySnapshotFromCaptured(ctx, client, {
+            key: snapshotKey,
+            endAt: capturedAt,
+            payload: prevPayload,
+            current: prevMap,
+          });
+        }
       }
     } catch {
       // ignore
@@ -456,12 +361,27 @@ function inferWarDayIndex(
   // Infer the day from cumulative decks used instead.
   if (periodType === 'colosseum') {
     let maxTotal = 0;
+    let maxToday = 0;
+    let anyTodayObserved = false;
     for (const snap of participants.values()) {
       const total =
         typeof snap?.decksUsed === 'number' && Number.isFinite(snap.decksUsed) ? snap.decksUsed : 0;
       if (total > maxTotal) maxTotal = total;
+
+      const todayDefined =
+        typeof snap?.decksUsedToday === 'number' && Number.isFinite(snap.decksUsedToday);
+      if (todayDefined) anyTodayObserved = true;
+      const today = todayDefined ? (snap.decksUsedToday as number) : 0;
+      if (today > maxToday) maxToday = today;
     }
-    const inferred = Math.max(1, Math.ceil((maxTotal || 1) / 4));
+
+    // Special case: immediately after daily reset, totals may still be exactly a multiple of 4,
+    // while the per-day counter is 0. This lets us detect the new day *before* anyone uses a deck.
+    const isResetBoundary =
+      anyTodayObserved && maxToday === 0 && maxTotal > 0 && maxTotal % 4 === 0;
+    const inferred = isResetBoundary
+      ? Math.floor(maxTotal / 4) + 1
+      : Math.max(1, Math.ceil((maxTotal || 1) / 4));
     return clampWarDayIndex(inferred);
   }
 
@@ -562,74 +482,6 @@ async function ingestRiverRaceLog(ctx: AppContext) {
   }
 }
 
-async function maybePostWarDayEndSnapshot(
-  ctx: AppContext,
-  client: Client,
-  payload: any,
-  current: Map<string, ParticipantSnapshot>,
-) {
-  if (!isRegularWarBattleDay(payload)) return;
-
-  const periodTypeRaw = typeof payload?.periodType === 'string' ? payload.periodType : undefined;
-  const periodType = periodTypeRaw?.trim().toLowerCase();
-
-  // Prefer exact timing from /currentwar.warEndTime.
-  let endRaw: string | undefined;
-  let endAt: Date | undefined;
-  let endSource: 'currentwar' | 'riverrace' | 'none' = 'none';
-
-  const currentWarEnd = await tryGetCurrentWarEndTime(ctx);
-  if (currentWarEnd?.raw && currentWarEnd?.at) {
-    endRaw = currentWarEnd.raw;
-    endAt = currentWarEnd.at;
-    endSource = 'currentwar';
-  }
-
-  if (!endRaw || !endAt) {
-    const t2 = findPeriodEndTime(payload);
-    if (t2.raw && t2.at) {
-      endRaw = t2.raw;
-      endAt = t2.at;
-      endSource = 'riverrace';
-    }
-  }
-
-  // If we can't find an end time, rely on rollover snapshots.
-  if (!endRaw || !endAt) return;
-
-  const msLeft = endAt.getTime() - Date.now();
-  // Schedule once per period end time. This lets us schedule immediately on startup
-  // (even if the period ends hours from now) and naturally repeats once per day.
-  if (!(msLeft > 0)) return;
-
-  const snapshotKey = `war:day_snapshot:last_key`;
-  const key = `warDay:${endRaw}`;
-  const prevKey = dbGetJobState(ctx.db, snapshotKey);
-  if (prevKey === key) return;
-
-  // If we're extremely close already, post immediately (best-effort).
-  if (msLeft <= 5_000) {
-    console.log(
-      `[war] Snapshot too close to end; posting immediately (periodType=${periodType ?? 'unknown'}, source=${endSource}, endAtLocal=${toLocalDateTimeLabel(endAt)}, firesIn=${formatDurationHhMm(msLeft)})`,
-    );
-    await postWarDaySnapshotNow(ctx, client, key, endAt, snapshotKey);
-    return;
-  }
-
-  // Schedule exactly once per endTime key.
-  if (scheduledWarDaySnapshots.has(key)) return;
-  const delay = Math.max(msLeft - 1_500, 0); // aim ~1.5s before end
-  const timeout = setTimeout(() => {
-    scheduledWarDaySnapshots.delete(key);
-    void postWarDaySnapshotNow(ctx, client, key, endAt, snapshotKey).catch(() => undefined);
-  }, delay);
-  scheduledWarDaySnapshots.set(key, timeout);
-
-  console.log(
-    `[war] Scheduled end-of-day snapshot (periodType=${periodType ?? 'unknown'}, source=${endSource}, key=${key}, endAtLocal=${toLocalDateTimeLabel(endAt)}, firesIn=${formatDurationHhMm(delay)})`,
-  );
-}
-
 // Called on startup to ensure the end-of-period snapshot is scheduled immediately
 // (instead of waiting until the last minute cron tick).
 export async function primeWarDaySnapshotSchedule(ctx: AppContext, client: Client) {
@@ -637,169 +489,10 @@ export async function primeWarDaySnapshotSchedule(ctx: AppContext, client: Clien
   const current = extractParticipants(payload);
   const periodTypeRaw = typeof payload?.periodType === 'string' ? payload.periodType : undefined;
   const periodType = periodTypeRaw?.trim().toLowerCase();
-
-  // Show the user whether we can schedule off an exact warEndTime.
-  let endAt: Date | undefined;
-  let endSource: 'currentwar' | 'riverrace' | 'none' = 'none';
-
-  const currentWarEnd = await tryGetCurrentWarEndTime(ctx);
-  if (currentWarEnd?.at) {
-    endAt = currentWarEnd.at;
-    endSource = 'currentwar';
-  }
-  if (!endAt) {
-    const t2 = findPeriodEndTime(payload);
-    if (t2.at) {
-      endAt = t2.at;
-      endSource = 'riverrace';
-    }
-  }
-
-  if (endAt) {
-    const msLeft = endAt.getTime() - Date.now();
-    console.log(
-      `[war] Startup: end time available (periodType=${periodType ?? 'unknown'}, source=${endSource}, endAtLocal=${toLocalDateTimeLabel(endAt)}, firesIn=${formatDurationHhMm(msLeft)})`,
-    );
-  } else {
-    const cwNote = currentWarEndpointState === 'gone' ? ' /currentwar removed (410 Gone),' : '';
-    console.log(
-      `[war] Startup:${cwNote} no end time available (periodType=${periodType ?? 'unknown'}). Will capture minute snapshots and post the final snapshot on detected period change.`,
-    );
-  }
-  await maybePostWarDayEndSnapshot(ctx, client, payload, current);
-}
-
-async function postWarDaySnapshotNow(
-  ctx: AppContext,
-  client: Client,
-  key: string,
-  endAt: Date,
-  snapshotKey: string,
-) {
-  // Final dedupe check (covers timer + poll races)
-  const prevKey = dbGetJobState(ctx.db, snapshotKey);
-  if (prevKey === key) return;
-
-  const guild = await client.guilds.fetch(ctx.cfg.GUILD_ID);
-  const channel = await guild.channels.fetch(ctx.cfg.CHANNEL_WAR_LOGS_ID);
-  if (!channel || channel.type !== ChannelType.GuildText) return;
-
-  // Fetch fresh data right at the end for maximum accuracy.
-  const payload = await ctx.clash.getCurrentRiverRace(ctx.cfg.CLASH_CLAN_TAG);
-  const current = extractParticipants(payload);
-
-  const { raw: endRaw2, at: endAt2FromApi } = findPeriodEndTime(payload);
-  const endAt2 = endAt2FromApi ?? inferResetTimeUtc(ctx.cfg);
-  if (!isRegularWarBattleDay(payload)) return;
-
-  // If the API provides an end-time, use it as the canonical dedupe key.
-  if (endRaw2 && `warDay:${endRaw2}` !== key) return;
-
-  // If the API omits end-time fields, fall back to the configured UTC reset time.
-  // Guard against posting at the wrong time by requiring the scheduled endAt
-  // and the computed reset time to be very close.
-  if (!endRaw2) {
-    if (!endAt2) return;
-    const driftMs = Math.abs(endAt2.getTime() - endAt.getTime());
-    if (driftMs > 2 * 60_000) return;
-  }
-
-  const prevRaw = dbGetJobState(ctx.db, 'war:day_snapshot:last_snapshot');
-  const prev = new Map<string, ParticipantSnapshot>();
-  if (prevRaw) {
-    try {
-      const obj = JSON.parse(prevRaw) as Record<string, ParticipantSnapshot>;
-      for (const [tag, snap] of Object.entries(obj)) {
-        const norm = normalizeTagUpper(tag);
-        if (norm) prev.set(norm, snap);
-      }
-    } catch {
-      // ignore
-    }
-  }
-
-  const roster = await ctx.clash.getClanMembers(ctx.cfg.CLASH_CLAN_TAG).catch(() => []);
-  const nameByTag = new Map<string, string>();
-  for (const m of roster) {
-    const tag = normalizeTagUpper(m.tag);
-    if (tag) nameByTag.set(tag, m.name);
-  }
-
-  const tags = roster.length
-    ? roster.map((m) => normalizeTagUpper(m.tag)).filter((t): t is string => Boolean(t))
-    : Array.from(current.keys());
-  const scored = tags.map((tag) => {
-    const before = prev.get(tag) ?? {};
-    const after = current.get(tag) ?? {};
-    const dFame = clampNonNegative((after.fame ?? 0) - (before.fame ?? 0));
-    const dDecks = clampNonNegative((after.decksUsed ?? 0) - (before.decksUsed ?? 0));
-    return { tag, dFame, dDecks };
-  });
-
-  scored.sort((a, b) => b.dFame - a.dFame || b.dDecks - a.dDecks || a.tag.localeCompare(b.tag));
-
-  const lines: string[] = [];
-  const noBattles: string[] = [];
-  for (const { tag, dFame, dDecks } of scored) {
-    const name = nameByTag.get(tag) ?? tag;
-    lines.push(`• **${name}**: ${dFame} points`);
-    if (dDecks <= 0 && dFame <= 0) noBattles.push(`${name}`);
-  }
-
-  const ts = new Date();
-  const header = `War day snapshot (ending ${endAt.toLocaleString()}):`;
-  const chunks = chunkEmbedDescriptions([`**${header}**`, ...lines]);
-
-  // Snapshots go into a thread to keep #war-logs readable.
-  const starter = await channel.send({ content: header }).catch(() => null);
-  const thread = starter
-    ? await starter
-        .startThread({
-          name: `War day summary — ${endAt.toLocaleDateString()}`,
-          autoArchiveDuration: 1440,
-          reason: 'War day snapshot thread',
-        })
-        .catch(() => null)
-    : null;
-  const target: any = thread ?? channel;
-
-  const noBattlesText = noBattles.length
-    ? noBattles.length > 40
-      ? `${noBattles.slice(0, 40).join(', ')} … (+${noBattles.length - 40} more)`
-      : noBattles.join(', ')
-    : '(none)';
-
-  for (let i = 0; i < chunks.length; i += 1) {
-    const embed = new EmbedBuilder()
-      .setTitle('War Day Summary')
-      .setDescription(chunks[i])
-      .setFooter({ text: ts.toLocaleString() });
-    if (i === 0) embed.addFields({ name: 'No battles', value: noBattlesText });
-    if (chunks.length > 1) embed.setAuthor({ name: `Part ${i + 1} of ${chunks.length}` });
-    await target.send({ embeds: [embed] }).catch(() => undefined);
-  }
-
-  // Persist baseline for next day and dedupe key.
-  const serialized: Record<string, ParticipantSnapshot> = {};
-  for (const [tag, snap] of current.entries()) {
-    const norm = normalizeTagUpper(tag);
-    if (norm) serialized[norm] = snap;
-  }
-  dbSetJobState(ctx.db, 'war:day_snapshot:last_snapshot', JSON.stringify(serialized));
-  dbSetJobState(ctx.db, snapshotKey, key);
-
-  // Also keep a rolling history for user-facing queries.
-  const payloadDayIndex = inferWarDayIndex(payload, current);
-  const periodType = typeof payload?.periodType === 'string' ? payload.periodType : undefined;
-  appendSnapshotHistory(ctx, {
-    key,
-    endRaw: String(endRaw2),
-    endAtIso: endAt.toISOString(),
-    capturedAtIso: new Date().toISOString(),
-    periodType,
-    dayIndex: payloadDayIndex,
-    snapshot: serialized,
-  });
+  console.log(
+    `[war] Startup: rollover mode enabled (periodType=${periodType ?? 'unknown'}). Will capture minute snapshots and post the final snapshot on detected period change.`,
+  );
+  await maybePostSnapshotOnPeriodChange(ctx, client, payload, current);
 }
 
 function diffSnapshots(
@@ -838,9 +531,6 @@ export async function pollWarOnce(ctx: AppContext, client: Client) {
   // Always maintain a last-known snapshot so we can post an accurate "rollover"
   // snapshot even if the API doesn't give us an explicit end time.
   await maybePostSnapshotOnPeriodChange(ctx, client, payload, next);
-
-  // If it's a war day and we're within ~1 minute of period end, post the snapshot.
-  await maybePostWarDayEndSnapshot(ctx, client, payload, next);
 
   const prevRaw = dbGetJobState(ctx.db, 'war:last_participants');
   const prev = new Map<string, ParticipantSnapshot>();

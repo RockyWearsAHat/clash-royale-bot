@@ -68,6 +68,47 @@ type WarStatsRenderResult =
       errorEmbeds: EmbedBuilder[];
     };
 
+type WarStatsRenderOptions = {
+  includeRecord?: boolean;
+  resolvedOverride?: ResolvedParticipants;
+};
+
+export async function renderWarLogsEmbedsForSnapshot(
+  ctx: AppContext,
+  args: {
+    payload: any;
+    log: any;
+    roster: any[];
+    snapshot: Record<string, ParticipantSnapshot>;
+    snapshotEndAt: Date;
+    warDayIndex?: number;
+    periodType?: string;
+  },
+  opts?: { includeRecord?: boolean },
+): Promise<WarStatsRenderResult> {
+  const snapMap = snapshotRecordToMap(args.snapshot);
+  const resolved: ResolvedParticipants = {
+    label: 'snapshot',
+    participants: snapMap,
+    warDayIndex: args.warDayIndex,
+    periodType: args.periodType,
+    snapshotEndAtMs: args.snapshotEndAt.getTime(),
+    source: 'snapshot',
+  };
+
+  return renderWarStatsEmbedsFromData(
+    ctx,
+    {
+      parsed: null,
+      dayArgRaw: null,
+      payload: args.payload,
+      log: args.log,
+      roster: args.roster,
+    },
+    { includeRecord: opts?.includeRecord ?? true, resolvedOverride: resolved },
+  );
+}
+
 function safeNumber(v: unknown): number | undefined {
   if (typeof v === 'number' && Number.isFinite(v)) return v;
   if (typeof v === 'string' && v.trim()) {
@@ -161,6 +202,47 @@ function extractParticipants(payload: any): Map<string, ParticipantSnapshot> {
 function pct(n: number): string {
   if (!Number.isFinite(n)) return '0%';
   return `${n.toFixed(1)}%`;
+}
+
+function ordinalSuffix(n: number): string {
+  const x = Math.abs(Math.trunc(n));
+  const mod100 = x % 100;
+  if (mod100 >= 11 && mod100 <= 13) return 'th';
+  switch (x % 10) {
+    case 1:
+      return 'st';
+    case 2:
+      return 'nd';
+    case 3:
+      return 'rd';
+    default:
+      return 'th';
+  }
+}
+
+function formatMonthDayOrdinal(d: Date): string {
+  const day = d.getDate();
+  let month = '???';
+  try {
+    month = d.toLocaleString('en-US', { month: 'short' });
+  } catch {
+    month = d.toISOString().slice(5, 7);
+  }
+  return `${month} ${day}${ordinalSuffix(day)}`;
+}
+
+function formatShortMonthDay(d: Date): string {
+  try {
+    return d.toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
+  } catch {
+    return d.toISOString().slice(0, 10);
+  }
+}
+
+function snapshotDayRangeLabel(endAtMs: number): string {
+  const end = new Date(endAtMs);
+  const start = new Date(endAtMs - 24 * 60 * 60 * 1000);
+  return `${formatMonthDayOrdinal(start)} - ${formatMonthDayOrdinal(end)}`;
 }
 
 function clipLabel(input: string, maxLen: number): string {
@@ -534,6 +616,7 @@ function renderWarStatsEmbedsFromData(
     log: any;
     roster: any[];
   },
+  opts?: WarStatsRenderOptions,
 ): WarStatsRenderResult {
   const { parsed, dayArgRaw, payload, log, roster } = args;
 
@@ -555,9 +638,15 @@ function renderWarStatsEmbedsFromData(
     typeof payload?.periodType === 'string' ? payload.periodType : undefined;
   const livePeriodType = livePeriodTypeRaw?.trim().toLowerCase();
   const liveParticipants = extractParticipants(payload);
-  const resolved = parsed
-    ? resolveParticipantsForRef(ctx, parsed, liveParticipants)
-    : ({ label: 'live', participants: liveParticipants, source: 'live' } as ResolvedParticipants);
+  const resolved =
+    opts?.resolvedOverride ??
+    (parsed
+      ? resolveParticipantsForRef(ctx, parsed, liveParticipants)
+      : ({
+          label: 'live',
+          participants: liveParticipants,
+          source: 'live',
+        } as ResolvedParticipants));
   const participants = resolved.participants;
 
   if (!participants || participants.size === 0) {
@@ -614,9 +703,11 @@ function renderWarStatsEmbedsFromData(
   const viewPhase: 'warDay' | 'prepDay' =
     parsed?.kind === 'prepDay'
       ? 'prepDay'
-      : parsed && parsed.kind !== 'live'
+      : resolved.source === 'snapshot'
         ? 'warDay'
-        : livePhase;
+        : parsed && parsed.kind !== 'live'
+          ? 'warDay'
+          : livePhase;
 
   const dayIdx =
     resolved.warDayIndex ??
@@ -625,41 +716,51 @@ function renderWarStatsEmbedsFromData(
   const viewPeriodTypeRaw = resolved.periodType ?? livePeriodTypeRaw;
   const viewPeriodType =
     typeof viewPeriodTypeRaw === 'string' ? viewPeriodTypeRaw.trim().toLowerCase() : undefined;
-  const warDayLabelBase = viewPeriodType === 'colosseum' ? 'Colosseum day' : 'War day';
+  const warDayLabelBase = viewPeriodType === 'colosseum' ? 'Colosseum Day' : 'War Day';
 
-  const labelDate = (() => {
+  const dateLabel = (() => {
     const ms =
       typeof resolved.snapshotEndAtMs === 'number' && Number.isFinite(resolved.snapshotEndAtMs)
         ? resolved.snapshotEndAtMs
-        : Date.now();
-    const d = new Date(ms);
-    try {
-      return d.toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
-    } catch {
-      return d.toISOString().slice(0, 10);
-    }
+        : NaN;
+
+    // For historical snapshots, show the full war-day span (e.g. Jan 1st - Jan 2nd)
+    // instead of only the end date.
+    if (Number.isFinite(ms)) return snapshotDayRangeLabel(ms);
+
+    // For live views, keep a concise date label.
+    return formatShortMonthDay(new Date());
   })();
 
   const phaseLabel =
     viewPhase === 'prepDay'
-      ? 'Prep day'
+      ? 'Prep Day'
       : dayIdx
         ? `${warDayLabelBase} ${dayIdx}`
         : viewPeriodType === 'colosseum'
           ? 'Colosseum'
-          : 'War day';
+          : 'War Day';
 
-  const phaseLabelDated = viewPhase === 'prepDay' ? phaseLabel : `${phaseLabel} (${labelDate})`;
+  const phaseLabelDated = viewPhase === 'prepDay' ? phaseLabel : `${phaseLabel} (${dateLabel})`;
 
   const viewLabel =
     parsed && parsed.kind === 'live' ? phaseLabelDated : parsed ? resolved.label : phaseLabelDated;
 
+  const includeRecord = opts?.includeRecord ?? true;
+  const overviewFields: Array<{ name: string; value: string; inline?: boolean }> = [
+    { name: 'Win rate', value: warsCount > 0 ? pct(winRate) : '—', inline: true },
+  ];
+  if (includeRecord) {
+    overviewFields.push({
+      name: 'Record',
+      value: warsCount > 0 ? `${wins}-${losses}` : '—',
+      inline: true,
+    });
+  }
+
   const embed = infoEmbed('War Overview', viewLabel)
     .setTimestamp(new Date())
-    .addFields(
-      { name: 'Win rate', value: warsCount > 0 ? pct(winRate) : '—', inline: true },
-      { name: 'Record', value: warsCount > 0 ? `${wins}-${losses}` : '—', inline: true },
-    );
+    .addFields(overviewFields);
 
   if (resolved.note) embed.addFields({ name: 'Note', value: resolved.note, inline: false });
 
@@ -669,7 +770,7 @@ function renderWarStatsEmbedsFromData(
     ? roster.map((m) => normalizeTagUpper(m.tag)).filter((t): t is string => Boolean(t))
     : Array.from(participants.keys());
 
-  let participationTitle = `${phaseLabelDated} participation`;
+  let participationTitle = `${phaseLabelDated} Participation:`;
   let participationChunks: string[] = [];
 
   if (viewPhase === 'prepDay') {
@@ -765,7 +866,7 @@ function renderWarStatsEmbedsFromData(
 
   const continuationEmbeds = participationChunks
     .slice(1)
-    .map((extra) => infoEmbed('Participation — continued', extra));
+    .map((extra) => infoEmbed('Participation — Continued', extra));
 
   return { ok: true, firstEmbeds: [embed, firstParticipation], continuationEmbeds };
 }
@@ -1023,6 +1124,40 @@ function snapshotRecordToMap(rec: Record<string, ParticipantSnapshot> | undefine
   return out;
 }
 
+function inferColosseumDayIndexFromSnapshotRecord(
+  rec: Record<string, ParticipantSnapshot> | undefined,
+): number | undefined {
+  if (!rec) return undefined;
+  const snaps = Object.values(rec);
+  if (!snaps.length) return undefined;
+
+  let maxTotal = 0;
+  let maxToday = 0;
+  let anyTodayObserved = false;
+
+  for (const snap of snaps) {
+    const total =
+      typeof snap?.decksUsed === 'number' && Number.isFinite(snap.decksUsed) ? snap.decksUsed : 0;
+    if (total > maxTotal) maxTotal = total;
+
+    const todayDefined =
+      typeof (snap as any)?.decksUsedToday === 'number' &&
+      Number.isFinite((snap as any).decksUsedToday);
+    if (todayDefined) anyTodayObserved = true;
+    const today = todayDefined ? Number((snap as any).decksUsedToday) : 0;
+    if (today > maxToday) maxToday = today;
+  }
+
+  const isResetBoundary = anyTodayObserved && maxToday === 0 && maxTotal > 0 && maxTotal % 4 === 0;
+  const inferred = isResetBoundary
+    ? Math.floor(maxTotal / 4) + 1
+    : Math.max(1, Math.ceil((maxTotal || 1) / 4));
+  if (!Number.isFinite(inferred)) return undefined;
+  const i = Math.trunc(inferred);
+  if (i < 1 || i > 5) return undefined;
+  return i;
+}
+
 function resolveParticipantsForRef(
   ctx: AppContext,
   ref: ParsedDayRef,
@@ -1037,7 +1172,14 @@ function resolveParticipantsForRef(
     .filter((e) => e && typeof e.endAtIso === 'string' && e.snapshot)
     .map((e) => {
       const t = new Date(String(e.endAtIso)).getTime();
-      return { e, t: Number.isFinite(t) ? t : NaN };
+      const pt =
+        typeof e?.periodType === 'string' ? String(e.periodType).trim().toLowerCase() : undefined;
+      const storedDay = typeof e?.dayIndex === 'number' ? e.dayIndex : undefined;
+      const computedDay =
+        pt === 'colosseum'
+          ? (inferColosseumDayIndexFromSnapshotRecord(e.snapshot as any) ?? storedDay)
+          : storedDay;
+      return { e, t: Number.isFinite(t) ? t : NaN, pt, dayIndex: computedDay };
     })
     .filter((x) => Number.isFinite(x.t))
     .sort((a, b) => b.t - a.t);
@@ -1059,13 +1201,10 @@ function resolveParticipantsForRef(
   if (ref.kind === 'latest') {
     const picked = history[0];
     if (!picked) return missingSnapshot('latest war day');
-    const dayIdx = typeof picked.e.dayIndex === 'number' ? picked.e.dayIndex : undefined;
-    const pt =
-      typeof picked.e.periodType === 'string'
-        ? picked.e.periodType.trim().toLowerCase()
-        : undefined;
-    const base = pt === 'colosseum' ? 'Colosseum day' : 'War day';
-    const dayLabel = dayIdx ? `${base} ${dayIdx}` : pt === 'colosseum' ? 'Colosseum' : 'War day';
+    const dayIdx = typeof picked.dayIndex === 'number' ? picked.dayIndex : undefined;
+    const pt = picked.pt;
+    const base = pt === 'colosseum' ? 'Colosseum Day' : 'War Day';
+    const dayLabel = dayIdx ? `${base} ${dayIdx}` : pt === 'colosseum' ? 'Colosseum' : 'War Day';
     return {
       label: `Latest — ${dayLabel}`,
       participants: snapshotRecordToMap(picked.e.snapshot as any),
@@ -1078,15 +1217,12 @@ function resolveParticipantsForRef(
 
   if (ref.kind === 'warDay') {
     const matches = history.filter(
-      (x) => (typeof x.e.dayIndex === 'number' ? x.e.dayIndex : undefined) === ref.day,
+      (x) => (typeof x.dayIndex === 'number' ? x.dayIndex : undefined) === ref.day,
     );
     const picked = matches[0];
     if (!picked) return missingSnapshot(`war day ${ref.day}`);
-    const pt =
-      typeof picked.e.periodType === 'string'
-        ? picked.e.periodType.trim().toLowerCase()
-        : undefined;
-    const base = pt === 'colosseum' ? 'Colosseum day' : 'War day';
+    const pt = picked.pt;
+    const base = pt === 'colosseum' ? 'Colosseum Day' : 'War Day';
     return {
       label: `${base} ${ref.day}`,
       participants: snapshotRecordToMap(picked.e.snapshot as any),
@@ -1111,11 +1247,17 @@ function resolveParticipantsForRef(
     return missingSnapshot(`${ref.days} days ago`);
   }
 
-  const dayIdx = typeof best.e.dayIndex === 'number' ? best.e.dayIndex : undefined;
   const pt =
     typeof best.e.periodType === 'string' ? best.e.periodType.trim().toLowerCase() : undefined;
-  const base = pt === 'colosseum' ? 'Colosseum day' : 'War day';
-  const dayLabel = dayIdx ? `${base} ${dayIdx}` : pt === 'colosseum' ? 'Colosseum' : 'War day';
+  const dayIdx =
+    pt === 'colosseum'
+      ? (inferColosseumDayIndexFromSnapshotRecord(best.e.snapshot as any) ??
+        (typeof best.e.dayIndex === 'number' ? best.e.dayIndex : undefined))
+      : typeof best.e.dayIndex === 'number'
+        ? best.e.dayIndex
+        : undefined;
+  const base = pt === 'colosseum' ? 'Colosseum Day' : 'War Day';
+  const dayLabel = dayIdx ? `${base} ${dayIdx}` : pt === 'colosseum' ? 'Colosseum' : 'War Day';
   return {
     label: `${ref.days} days ago — ${dayLabel}`,
     participants: snapshotRecordToMap(best.e.snapshot as any),

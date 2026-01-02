@@ -81,11 +81,6 @@ export class ClashApi {
     return await this.request<any>(`/clans/${tag}/currentriverrace`, opts);
   }
 
-  async getCurrentWar(clanTag: string, opts?: { cacheBust?: boolean }): Promise<any> {
-    const tag = encodeTag(clanTag);
-    return await this.request<any>(`/clans/${tag}/currentwar`, opts);
-  }
-
   async getRiverRaceLog(clanTag: string, opts?: { cacheBust?: boolean }): Promise<any> {
     const tag = encodeTag(clanTag);
     return await this.request<any>(`/clans/${tag}/riverracelog`, opts);
