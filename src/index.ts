@@ -22,6 +22,7 @@ import { WarLogsCommand, WarStatsCommand } from './discord/warstats.js';
 import { handleWarlogsPublishButton } from './discord/warstats.js';
 import { StatsCommand, handleStatsPublishButton } from './discord/stats.js';
 import { NotifyNoMoreCommand, NotifyWhenSpotCommand } from './discord/spotNotify.js';
+import { PingUnusedDecksCommand } from './discord/pingUnusedDecks.js';
 import { startScheduler } from './jobs/scheduler.js';
 import { enforceChannelPermissions } from './discord/permissions.js';
 import { syncRolesOnce, enforceUnlinkedMemberVanquished } from './discord/roleSync.js';
@@ -53,6 +54,7 @@ registerHandlers(client, ctx, [
   WarLogsCommand,
   NotifyWhenSpotCommand,
   NotifyNoMoreCommand,
+  PingUnusedDecksCommand,
 ]);
 
 client.on('guildMemberAdd', async (member) => {
