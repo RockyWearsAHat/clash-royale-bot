@@ -5,97 +5,153 @@
 [![discord.js](https://img.shields.io/badge/discord.js-v14-5865F2?logo=discord&logoColor=white)](https://discord.js.org/)
 [![SQLite](https://img.shields.io/badge/SQLite-better--sqlite3-003B57?logo=sqlite&logoColor=white)](https://www.sqlite.org/)
 
-A production-style Discord bot for a single Clash Royale clan.
-It links Discord users to player tags, syncs roles from the clan roster, and posts war participation logs.
+Production-style Discord bot for a single Clash Royale clan: links Discord users to player tags, keeps Discord roles synced to the clan roster, and posts war participation logs on a schedule.
+
+## What this project demonstrates
+
+- **Real-world integration**: Discord (discord.js v14) + Clash Royale API
+- **Type-safe config**: `.env` validated with `zod`
+- **Idempotent background jobs**: role sync + war polling via `node-cron`
+- **Local persistence**: SQLite (`better-sqlite3`) with job checkpoints to avoid spam
+
+## Screenshots
+
+![Profile thread UI — manage linked account & discord settings](docs/screenshots/profile-thread.png)
+
+- Per user profile thread
+
+![Role sync outcome — member/elder/co-leader/leader roles](docs/screenshots/roles-synced.png)
+
+- Role sync outcome — member/elder/co-leader/leader roles
+
+![War logs channel — participation snapshots and deltas](docs/screenshots/war-logs-dev.png)
+
+- A snippet of a war log
 
 ## Features
 
-- Self-managed onboarding: unlinked users automatically get a verification/profile thread (no commands needed)
-- Role sync: assigns Discord roles based on link status and current clan membership/role
-- War monitoring: posts participation deltas + snapshots to a dedicated logs channel
-- Utilities: channel permission enforcement + open-spot notification subscriptions
+- **Onboarding (thread-based)**: unlinked users are guided to link their Clash tag in a dedicated verification/profile thread
+- **Access control**: non-members are funneled into a non-member area ("vanquished") while clan members get standard access
+- **Role sync**: assigns exactly one clan role (member/elder/co-leader/leader) based on the clan roster; removes stale roles
+- **War monitoring**: posts participation deltas + periodic snapshots into a war logs channel, de-duplicated via persisted checkpoints
+- **Utilities**: channel permission enforcement + open-spot notification subscriptions
+
+## How it works (high level)
+
+- **Source of truth**: Clash clan roster determines membership + rank
+- **Linking**: `discord_user_id → player_tag` stored in SQLite
+- **Sync loop**: cron jobs poll Clash endpoints and apply idempotent Discord updates
+- **Anti-spam**: job state is persisted so the bot doesn’t repost the same information
 
 ## Prerequisites
 
 - Node.js 20+
-- A Discord server where you have admin
-- A Clash Royale API token: https://developer.clashroyale.com/ (requires whitelisting your public IP)
+- A Discord server where you can manage roles/channels
+- A Clash Royale API token (requires whitelisting your public IP): https://developer.clashroyale.com/
 
-## Quick start (non-coder friendly)
+## Setup (instruction booklet)
 
-1. Create your config file
+### 1) Create your Discord application + bot
 
-- Copy `.env.example` to `.env`
-- Fill in:
-  - `DISCORD_TOKEN`, `DISCORD_APP_ID`
-  - `CLASH_API_TOKEN`, `CLASH_CLAN_TAG`
-  - `GUILD_ID`
-  - Channel IDs: `CHANNEL_GENERAL_ID`, `CHANNEL_VERIFICATION_ID`, `CHANNEL_WAR_LOGS_ID`, `CHANNEL_ANNOUNCEMENTS_ID`, `CHANNEL_NON_MEMBER_ID`
-  - Role IDs: `ROLE_NON_MEMBER_ID`, `ROLE_MEMBER_ID`, `ROLE_ELDER_ID`, `ROLE_COLEADER_ID`, `ROLE_LEADER_ID`
+1. In the Discord Developer Portal, create an Application and add a Bot.
+2. Copy:
+   - **Bot token** → `DISCORD_TOKEN`
+   - **Application ID** → `DISCORD_APP_ID`
+3. Enable **Server Members Intent** (required for role syncing).
 
-2. Double-click the launcher for your OS
+### 2) Invite the bot to your server
+
+- Use an OAuth2 invite URL with the correct scopes/permissions.
+- The bot must be able to:
+  - Manage Roles (for role syncing)
+  - Manage Channels/Threads (for verification thread UX)
+  - Send Messages + Read Message History (for logs and onboarding)
+
+### 3) Create a Clash Royale API token
+
+1. Go to https://developer.clashroyale.com/ and create an API token.
+2. **Whitelist your public IP** (required, otherwise requests will fail).
+3. Copy the token into `CLASH_API_TOKEN`.
+
+### 4) Create channels + roles in Discord
+
+You’ll need these IDs (enable **Developer Mode** in Discord to “Copy ID”):
+
+- Channels
+  - General: `CHANNEL_GENERAL_ID`
+  - Verification: `CHANNEL_VERIFICATION_ID`
+  - War logs: `CHANNEL_WAR_LOGS_ID`
+  - Announcements: `CHANNEL_ANNOUNCEMENTS_ID`
+  - Non-member area: `CHANNEL_NON_MEMBER_ID`
+- Roles
+  - Non-member (“vanquished”): `ROLE_NON_MEMBER_ID`
+  - Clan roles: `ROLE_MEMBER_ID`, `ROLE_ELDER_ID`, `ROLE_COLEADER_ID`, `ROLE_LEADER_ID`
+
+### 5) Configure environment variables
+
+1. Copy `.env.example` → `.env`
+2. Fill in the required values.
+
+Notes:
+
+- `CLASH_CLAN_TAG` should look like `#ABC123` (the bot will normalize missing `#`).
+- If you previously used legacy env names, `CHANNEL_VANQUISHED_ID` / `ROLE_VANQUISHED_ID` are still supported.
+
+## Run
+
+### Option A: One-click launchers (recommended for “just run it”)
 
 - Windows: `run-bot.bat`
 - macOS: `run-bot.command`
 - Linux: `run-bot.desktop`
 
-That’s it. The launcher will install dependencies (if needed), build the bot, register slash commands, and start it.
+Each launcher runs: install (if needed) → build → register commands → start.
 
-## Run
-
-### One-click launchers
-
-- Windows (double-click): `run-bot.bat`
-- macOS (double-click): `run-bot.command`
-- Linux (double-click): `run-bot.desktop`
-
-Each launcher runs the same flow: install (if needed) → build → register commands → start.
-
-Optional flags (via environment variables) for one-click launchers:
+Optional behavior (via env vars):
 
 - `INSTALL_AND_REGISTER=1` (default) — install deps + register commands
 - `INSTALL_AND_REGISTER=0` — skip install + skip command registration
+- Overrides (rare): `SKIP_INSTALL=1`, `REGISTER_COMMANDS=0`
 
-Advanced overrides (only set these if you need to override `INSTALL_AND_REGISTER`):
-
-- `SKIP_INSTALL=1` — skip `npm install`
-- `REGISTER_COMMANDS=0` — skip command registration
-
-### Terminal
-
-- macOS/Linux: `bash ./run-bot.sh`
-- Any OS with Node: `node ./scripts/run-bot.mjs`
-
-## Commands
-
-- `/stats` — clan roster + stats utilities (available in the general channel)
-- `/warstats` — current war stats (available in the war-logs channel)
-- `/warlogs` — war log publishing utilities (available in the war-logs channel)
-- `/notifywhenspot` — subscribe to be pinged when the clan has an open spot (available in the non-member channel)
-- `/notifynomore` — unsubscribe from open-spot notifications
-
-## How it works (high level)
-
-- Persistence: SQLite tables for user links and job state checkpoints
-- Sync loop: scheduled jobs pull clan/war data from the Clash API and apply idempotent updates
-- Source of truth: clan roster determines the target clan role; `.env` maps clan role → Discord role IDs
-
-## Onboarding flow
-
-1. A user joins the server (or speaks in the verification channel)
-2. The bot creates (or reuses) a private verification/profile thread for that user
-3. The user pastes their player tag (example: `#ABC123`) in the thread
-4. The bot validates the tag via the Clash API and stores a link in SQLite
-5. Role sync updates their Discord role(s) automatically
-
-## Notes
-
-- If `PERMISSIONS_ENFORCE_ON_STARTUP=true`, the bot will attempt to apply channel overwrites on startup.
-  - Ensure the bot can see/edit those channels at least once, otherwise Discord will reject overwrite edits.
-- SQLite DB files are local-only and intentionally ignored by git (`bot.sqlite`, `bot.sqlite-wal`, `bot.sqlite-shm`).
-
-## Development
+### Option B: Terminal (developer-friendly)
 
 - Install deps: `npm i`
+- Build: `npm run build`
 - Register commands: `npm run register:commands`
-- Run with hot reload: `npm run dev`
+- Start: `npm start`
+- Dev watch: `npm run dev`
+
+## Slash commands
+
+Commands and where they’re intended to be used:
+
+- `/stats` — clan roster + stats utilities (general channel)
+- `/warstats` — current war stats (war logs channel)
+- `/warlogs` — war log publishing utilities (war logs channel)
+- `/notifywhenspot` — subscribe to open-spot pings (non-member channel)
+- `/notifynomore` — unsubscribe from open-spot pings
+
+## Onboarding flow (what a new user experiences)
+
+1. User joins the server (or participates in the verification channel)
+2. Bot creates (or reuses) a private verification/profile thread
+3. User pastes their player tag (example: `#ABC123`)
+4. Bot validates the tag via the Clash API and stores the link in SQLite
+5. Role sync assigns either:
+   - a clan role (member/elder/co-leader/leader), or
+   - the non-member role ("vanquished") if they are not currently in the clan
+
+## Operations & maintenance
+
+- **Scheduling**: cron strings are configurable via `.env` (`ROLE_SYNC_CRON`, `WAR_POLL_CRON`, etc.).
+- **Database**: SQLite is local by default (`SQLITE_PATH=bot.sqlite`). WAL files may appear (`bot.sqlite-wal`, `bot.sqlite-shm`) and are not meant to be committed.
+- **Clash API reliability**: if your IP changes, Clash API calls will fail until you update the whitelist.
+
+## Repo map
+
+- `src/index.ts` — bot boot + scheduler startup
+- `src/config.ts` — `.env` parsing/validation
+- `src/db.ts` — SQLite schema/helpers
+- `src/clashApi.ts` — Clash Royale API client
+- `src/discord/` — commands, onboarding, role sync, permission enforcement
+- `src/jobs/` — scheduled jobs (role sync, war polling, empty spots)
