@@ -178,8 +178,8 @@ function appendSnapshotHistory(ctx: AppContext, entry: WarDaySnapshotHistoryEntr
 // "Regular" river-race battle days are days 1-4 (not prep/training).
 // The Clash payloads vary; we best-effort detect a day index.
 function isRegularWarBattleDay(payload: any): boolean {
-  const periodType = typeof payload?.periodType === 'string' ? payload.periodType : undefined;
-  if (periodType !== 'warDay') return false;
+  const periodTypeRaw = typeof payload?.periodType === 'string' ? payload.periodType : undefined;
+  const periodType = periodTypeRaw?.trim().toLowerCase();
 
   // Common fields seen across payload variants.
   const idx =
@@ -188,10 +188,16 @@ function isRegularWarBattleDay(payload: any): boolean {
     toFiniteInt(payload?.warDay) ??
     toFiniteInt(payload?.sectionIndex);
 
-  // If we can't find an index, fall back to periodType alone.
-  if (idx === undefined) return true;
+  // If we have a clear battle-day index, trust it.
+  // NOTE: some variants use a 5th day (colosseum).
+  if (idx !== undefined) return idx >= 1 && idx <= 5;
 
-  return idx >= 1 && idx <= 4;
+  // Otherwise, fall back to periodType-based inference.
+  if (periodType === 'warday' || periodType === 'colosseum') return true;
+  if (periodType && periodType.includes('war') && !periodType.includes('train')) return true;
+
+  // If we can't find an index, fall back to periodType alone.
+  return false;
 }
 
 function buildWarKey(clanTagUpper: string, item: any): string {

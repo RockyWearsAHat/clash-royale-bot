@@ -148,19 +148,35 @@ function formatNoBattles(names: string[], maxItems = 30): string {
 }
 
 function inferPhaseFromPayload(payload: any): 'warDay' | 'prepDay' {
-  const periodType = typeof payload?.periodType === 'string' ? payload.periodType : undefined;
-  return periodType === 'warDay' ? 'warDay' : 'prepDay';
+  const periodTypeRaw = typeof payload?.periodType === 'string' ? payload.periodType : undefined;
+  const periodType = periodTypeRaw?.trim().toLowerCase();
+
+  // Prefer explicit periodType when present.
+  if (periodType === 'warday') return 'warDay';
+  if (periodType === 'colosseum') return 'warDay';
+  if (periodType === 'training' || periodType === 'prepday') return 'prepDay';
+
+  // Heuristic: if the payload exposes an in-range war-day index (1-4), treat as battle day.
+  // This guards against API variants where periodType differs or is missing.
+  const idx = clampWarDayIndex(inferCurrentDayIndex(payload));
+  if (idx !== undefined) return 'warDay';
+
+  // Final fallback: some variants still include "war" in the periodType.
+  if (periodType && periodType.includes('war')) return 'warDay';
+
+  return 'prepDay';
 }
 
 function clampWarDayIndex(n: number | undefined): number | undefined {
   if (!Number.isFinite(n)) return undefined;
   const i = Math.trunc(n as number);
-  if (i < 1 || i > 4) return undefined;
+  if (i < 1 || i > 5) return undefined;
   return i;
 }
 
 function decksAvailableForWarDay(dayIndex: number | undefined): number {
-  const idx = clampWarDayIndex(dayIndex) ?? 4;
+  // If we can't infer the day, default to day 1 (4 decks) to avoid overstating availability.
+  const idx = clampWarDayIndex(dayIndex) ?? 1;
   return idx * 4;
 }
 
@@ -175,6 +191,25 @@ function padLeft(input: string, width: number): string {
   return `${' '.repeat(width - s.length)}${s}`;
 }
 
+function padRight(input: string, width: number): string {
+  const s = String(input ?? '');
+  if (s.length >= width) return s;
+  return `${s}${' '.repeat(width - s.length)}`;
+}
+
+function padCenter(input: string, width: number): string {
+  const s = String(input ?? '');
+  if (s.length >= width) return s;
+  const left = Math.floor((width - s.length) / 2);
+  const right = width - s.length - left;
+  return `${' '.repeat(left)}${s}${' '.repeat(right)}`;
+}
+
+const COL_FAME_W = 6;
+const COL_TODAY_W = 7;
+const COL_TOTAL_W = 7;
+const COL_NAME_W = 24;
+
 function buildWarDayParticipationRows(
   scored: Array<{
     tag: string;
@@ -188,12 +223,12 @@ function buildWarDayParticipationRows(
   const rows: string[] = [];
   for (const { tag, fame, decksUsedToday, decksTotalUsed, decksTotalAvail } of scored) {
     const nameRaw = nameByTag.get(tag) ?? tag;
-    const name = clipLabel(nameRaw, 24);
+    const name = padRight(clipLabel(nameRaw, COL_NAME_W), COL_NAME_W);
 
     const todayLabel = `${clampNonNegative(decksUsedToday)}/4`;
     const totalLabel = `${clampNonNegative(decksTotalUsed)}/${decksTotalAvail}`;
     rows.push(
-      `${padLeft(String(clampNonNegative(fame)), 5)}  ${padLeft(todayLabel, 5)}  ${padLeft(totalLabel, 5)}  ${name}`,
+      `${padRight(String(clampNonNegative(fame)), COL_FAME_W)}  ${padRight(todayLabel, COL_TODAY_W)}  ${padRight(totalLabel, COL_TOTAL_W)}  ${name}`,
     );
   }
   return rows;
@@ -206,9 +241,9 @@ function buildPrepDayParticipationRows(
   const rows: string[] = [];
   for (const { tag, decksUsedToday } of scored) {
     const nameRaw = nameByTag.get(tag) ?? tag;
-    const name = clipLabel(nameRaw, 24);
+    const name = padRight(clipLabel(nameRaw, COL_NAME_W), COL_NAME_W);
     const todayLabel = `${clampNonNegative(decksUsedToday)}/4`;
-    rows.push(`${padLeft(todayLabel, 5)}  ${name}`);
+    rows.push(`${padRight(todayLabel, COL_TODAY_W)}  ${name}`);
   }
   return rows;
 }
@@ -246,12 +281,20 @@ function toFiniteInt(v: unknown): number | undefined {
 }
 
 function inferCurrentDayIndex(payload: any): number | undefined {
-  return (
-    toFiniteInt(payload?.periodIndex) ??
-    toFiniteInt(payload?.dayIndex) ??
-    toFiniteInt(payload?.warDay) ??
-    toFiniteInt(payload?.sectionIndex)
-  );
+  const periodTypeRaw = typeof payload?.periodType === 'string' ? payload.periodType : undefined;
+  const periodType = periodTypeRaw?.trim().toLowerCase();
+
+  // Many payloads expose a 1-based warDay/dayIndex. Prefer those.
+  const direct = toFiniteInt(payload?.dayIndex) ?? toFiniteInt(payload?.warDay);
+  if (direct !== undefined) return direct;
+
+  // Some variants use a 0-based sectionIndex:
+  // 0=training, 1=war day 1, ..., 4=colosseum (day 5).
+  const sectionIndex = toFiniteInt(payload?.sectionIndex);
+  if (sectionIndex === undefined) return undefined;
+  if (periodType === 'colosseum') return 5;
+  if (sectionIndex >= 1 && sectionIndex <= 4) return sectionIndex;
+  return sectionIndex;
 }
 
 function parseRelativeDayInput(raw: string): ParsedDayRef | null {
@@ -353,7 +396,7 @@ function parseRelativeDayInput(raw: string): ParsedDayRef | null {
     s.match(/^wd\s*(\d{1,2})$/);
   if (war) {
     const day = Number(war[1]);
-    if (Number.isFinite(day) && day >= 1 && day <= 4) return { kind: 'warDay', day };
+    if (Number.isFinite(day) && day >= 1 && day <= 5) return { kind: 'warDay', day };
   }
 
   return null;
@@ -384,7 +427,7 @@ function decodeWarstatsPublishRef(kind: string, nRaw: string): ParsedDayRef | nu
     case 'daysAgo':
       return { kind: 'daysAgo', days: Math.max(0, num) };
     case 'warDay':
-      if (num >= 1 && num <= 4) return { kind: 'warDay', day: num };
+      if (num >= 1 && num <= 5) return { kind: 'warDay', day: num };
       return null;
     case 'prepDay':
       if (num >= 1) return { kind: 'prepDay', day: num };
@@ -538,7 +581,7 @@ function renderWarStatsEmbedsFromData(
       if ((decksUsedToday ?? 0) <= 0 && (fame ?? 0) <= 0) noBattles.push(name);
     }
 
-    const header = ' TODAY  PLAYER';
+    const header = `${padRight('TODAY', COL_TODAY_W)}  ${padRight('PLAYER', COL_NAME_W)}`;
     const rows = buildPrepDayParticipationRows(scored, nameByTag);
     participationChunks = chunkTableForEmbed(header, rows);
   } else {
@@ -601,7 +644,7 @@ function renderWarStatsEmbedsFromData(
       if ((decksUsedToday ?? 0) <= 0) noBattles.push(name);
     }
 
-    const header = ` FAME  TODAY  TOTAL  PLAYER`;
+    const header = `${padRight('FAME', COL_FAME_W)}  ${padRight('TODAY', COL_TODAY_W)}  ${padRight('TOTAL', COL_TOTAL_W)}  ${padRight('PLAYER', COL_NAME_W)}`;
     const rows = buildWarDayParticipationRows(scored, nameByTag);
     participationChunks = chunkTableForEmbed(header, rows);
   }
