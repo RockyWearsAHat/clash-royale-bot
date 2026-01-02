@@ -49,14 +49,6 @@ const EnvSchema = z
     // Keep this relatively infrequent to reduce Discord API churn.
     PERMISSIONS_ENFORCE_CRON: z.string().min(1).default('*/1 * * * *'),
 
-    // Fallback end-of-day reset time (UTC) for river race snapshots.
-    // Some Clash API payloads omit period end times, so we approximate the daily reset.
-    // Format: HH:MM (24h), e.g. "10:00".
-    WAR_DAY_RESET_UTC: z
-      .string()
-      .regex(/^([01]\d|2[0-3]):[0-5]\d$/, 'Must be in HH:MM 24h format (UTC)')
-      .optional(),
-
     // Dev-only helper: if true, recreates all linked users' profile threads at startup
     // so the latest UI revisions are applied.
     DEV_RECREATE_PROFILE_THREADS: z
