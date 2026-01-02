@@ -3,6 +3,7 @@ import { loadConfig } from './config.js';
 import { WarLogsCommand, WarStatsCommand } from './discord/warstats.js';
 import { StatsCommand } from './discord/stats.js';
 import { NotifyNoMoreCommand, NotifyWhenSpotCommand } from './discord/spotNotify.js';
+import { PingUnusedDecksCommand } from './discord/pingUnusedDecks.js';
 import http from 'node:http';
 import { randomBytes } from 'node:crypto';
 
@@ -14,6 +15,7 @@ const commands = [
   WarLogsCommand.data,
   NotifyWhenSpotCommand.data,
   NotifyNoMoreCommand.data,
+  PingUnusedDecksCommand.data,
 ].map((c) => c.toJSON());
 
 const rest = new REST({ version: '10' }).setToken(cfg.DISCORD_TOKEN);
