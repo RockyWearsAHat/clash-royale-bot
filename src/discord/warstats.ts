@@ -8,6 +8,7 @@ import {
   type ChatInputCommandInteraction,
   type ButtonInteraction,
 } from 'discord.js';
+import { randomUUID } from 'crypto';
 import type { SlashCommand } from './commands.js';
 import type { AppContext } from '../types.js';
 import { asCodeBlock, chunkLinesForEmbed, infoEmbed } from './ui.js';
@@ -18,6 +19,15 @@ type ParticipantSnapshot = {
   fame?: number;
   repairs?: number;
   boatAttacks?: number;
+};
+
+type MinuteCapture = {
+  capturedAtIso?: string;
+  periodKey?: string;
+  periodType?: string;
+  sectionIndex?: number;
+  payload?: any;
+  snapshot?: Record<string, ParticipantSnapshot>;
 };
 
 type SnapshotHistoryEntry = {
@@ -41,6 +51,7 @@ type ResolvedParticipants = {
   participants?: Map<string, ParticipantSnapshot>;
   label: string;
   warDayIndex?: number;
+  periodType?: string;
   snapshotEndAtMs?: number;
   source: 'snapshot' | 'live';
   note?: string;
@@ -64,6 +75,23 @@ function safeNumber(v: unknown): number | undefined {
     if (Number.isFinite(n)) return n;
   }
   return undefined;
+}
+
+function readLatestMinuteCapture(ctx: AppContext): MinuteCapture | null {
+  const raw = ctx.db
+    .prepare('SELECT value FROM job_state WHERE key = ?')
+    .get('war:period:last_capture') as { value: string } | undefined;
+  if (!raw?.value) return null;
+  try {
+    const obj = JSON.parse(raw.value);
+    return obj && typeof obj === 'object' ? (obj as MinuteCapture) : null;
+  } catch {
+    return null;
+  }
+}
+
+function snapshotRecordToParticipants(rec: Record<string, ParticipantSnapshot> | undefined) {
+  return snapshotRecordToMap(rec);
 }
 
 function normalizeTagUpper(raw: unknown): string | undefined {
@@ -284,17 +312,30 @@ function inferCurrentDayIndex(payload: any): number | undefined {
   const periodTypeRaw = typeof payload?.periodType === 'string' ? payload.periodType : undefined;
   const periodType = periodTypeRaw?.trim().toLowerCase();
 
+  // In some "colosseum" weeks, fields like dayIndex/sectionIndex are not a per-day index.
+  // Infer the day from cumulative decks used instead.
+  if (periodType === 'colosseum') {
+    const participants = extractParticipants(payload);
+    let maxTotal = 0;
+    for (const snap of participants.values()) {
+      const total =
+        typeof snap?.decksUsed === 'number' && Number.isFinite(snap.decksUsed) ? snap.decksUsed : 0;
+      if (total > maxTotal) maxTotal = total;
+    }
+    const inferred = Math.max(1, Math.ceil((maxTotal || 1) / 4));
+    return clampWarDayIndex(inferred);
+  }
+
   // Many payloads expose a 1-based warDay/dayIndex. Prefer those.
   const direct = toFiniteInt(payload?.dayIndex) ?? toFiniteInt(payload?.warDay);
   if (direct !== undefined) return direct;
 
-  // Some variants use a 0-based sectionIndex:
-  // 0=training, 1=war day 1, ..., 4=colosseum (day 5).
+  // Some variants use sectionIndex (1..4); treat that as day index.
   const sectionIndex = toFiniteInt(payload?.sectionIndex);
-  if (sectionIndex === undefined) return undefined;
-  if (periodType === 'colosseum') return 5;
-  if (sectionIndex >= 1 && sectionIndex <= 4) return sectionIndex;
-  return sectionIndex;
+  if (sectionIndex !== undefined && sectionIndex >= 1 && sectionIndex <= 5) return sectionIndex;
+
+  // No further inference for regular war days (avoid guessing from deck totals).
+  return undefined;
 }
 
 function parseRelativeDayInput(raw: string): ParsedDayRef | null {
@@ -410,7 +451,8 @@ function warstatsPublishCustomId(invokerUserId: string, parsed: ParsedDayRef | n
         ? parsed.days
         : parsed.day
       : 0;
-  return `publish:warlogs:${invokerUserId}:${kind}:${n}`;
+  const token = randomUUID();
+  return `publish:warlogs:${invokerUserId}:${kind}:${n}:${token}`;
 }
 
 function decodeWarstatsPublishRef(kind: string, nRaw: string): ParsedDayRef | null {
@@ -447,6 +489,42 @@ function buildWarstatsPublishRow(customId: string, disabled = false) {
   );
 }
 
+type WarlogsPublishCache = {
+  invokerUserId: string;
+  createdAtIso: string;
+  parsedKind: string;
+  parsedN: number;
+  firstEmbeds: any[];
+  continuationEmbeds: any[];
+};
+
+function publishCacheKey(token: string): string {
+  return `war:publish_cache:${token}`;
+}
+
+function writePublishCache(ctx: AppContext, token: string, cache: WarlogsPublishCache) {
+  ctx.db
+    .prepare('INSERT OR REPLACE INTO job_state(key, value) VALUES(?, ?)')
+    .run(publishCacheKey(token), JSON.stringify(cache));
+}
+
+function readPublishCache(ctx: AppContext, token: string): WarlogsPublishCache | null {
+  const raw = ctx.db
+    .prepare('SELECT value FROM job_state WHERE key = ?')
+    .get(publishCacheKey(token)) as { value: string } | undefined;
+  if (!raw?.value) return null;
+  try {
+    const obj = JSON.parse(raw.value);
+    return obj && typeof obj === 'object' ? (obj as WarlogsPublishCache) : null;
+  } catch {
+    return null;
+  }
+}
+
+function deletePublishCache(ctx: AppContext, token: string) {
+  ctx.db.prepare('DELETE FROM job_state WHERE key = ?').run(publishCacheKey(token));
+}
+
 function renderWarStatsEmbedsFromData(
   ctx: AppContext,
   args: {
@@ -473,6 +551,9 @@ function renderWarStatsEmbedsFromData(
 
   const currentDayIndex = inferCurrentDayIndex(payload);
   const livePhase = inferPhaseFromPayload(payload);
+  const livePeriodTypeRaw =
+    typeof payload?.periodType === 'string' ? payload.periodType : undefined;
+  const livePeriodType = livePeriodTypeRaw?.trim().toLowerCase();
   const liveParticipants = extractParticipants(payload);
   const resolved = parsed
     ? resolveParticipantsForRef(ctx, parsed, liveParticipants)
@@ -541,11 +622,37 @@ function renderWarStatsEmbedsFromData(
     resolved.warDayIndex ??
     (viewPhase === 'warDay' ? clampWarDayIndex(currentDayIndex) : undefined);
 
+  const viewPeriodTypeRaw = resolved.periodType ?? livePeriodTypeRaw;
+  const viewPeriodType =
+    typeof viewPeriodTypeRaw === 'string' ? viewPeriodTypeRaw.trim().toLowerCase() : undefined;
+  const warDayLabelBase = viewPeriodType === 'colosseum' ? 'Colosseum day' : 'War day';
+
+  const labelDate = (() => {
+    const ms =
+      typeof resolved.snapshotEndAtMs === 'number' && Number.isFinite(resolved.snapshotEndAtMs)
+        ? resolved.snapshotEndAtMs
+        : Date.now();
+    const d = new Date(ms);
+    try {
+      return d.toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
+    } catch {
+      return d.toISOString().slice(0, 10);
+    }
+  })();
+
   const phaseLabel =
-    viewPhase === 'prepDay' ? 'Prep day' : dayIdx ? `War day ${dayIdx}` : 'War day';
+    viewPhase === 'prepDay'
+      ? 'Prep day'
+      : dayIdx
+        ? `${warDayLabelBase} ${dayIdx}`
+        : viewPeriodType === 'colosseum'
+          ? 'Colosseum'
+          : 'War day';
+
+  const phaseLabelDated = viewPhase === 'prepDay' ? phaseLabel : `${phaseLabel} (${labelDate})`;
 
   const viewLabel =
-    parsed && parsed.kind === 'live' ? phaseLabel : parsed ? resolved.label : phaseLabel;
+    parsed && parsed.kind === 'live' ? phaseLabelDated : parsed ? resolved.label : phaseLabelDated;
 
   const embed = infoEmbed('War Overview', viewLabel)
     .setTimestamp(new Date())
@@ -562,7 +669,7 @@ function renderWarStatsEmbedsFromData(
     ? roster.map((m) => normalizeTagUpper(m.tag)).filter((t): t is string => Boolean(t))
     : Array.from(participants.keys());
 
-  let participationTitle = `${phaseLabel} participation`;
+  let participationTitle = `${phaseLabelDated} participation`;
   let participationChunks: string[] = [];
 
   if (viewPhase === 'prepDay') {
@@ -680,11 +787,69 @@ async function renderWarStatsEmbeds(
     };
   }
 
-  const [payload, log, roster] = await Promise.all([
-    ctx.clash.getCurrentRiverRace(ctx.cfg.CLASH_CLAN_TAG, { cacheBust: true }),
-    ctx.clash.getRiverRaceLog(ctx.cfg.CLASH_CLAN_TAG, { cacheBust: true }),
+  // Try live API first; if it fails (rate limit, network, etc.) or comes back without
+  // participants, gracefully fall back to the latest minute snapshot captured by the job.
+  let payload: any | null = null;
+  let payloadFromMinute = false;
+
+  try {
+    payload = await ctx.clash.getCurrentRiverRace(ctx.cfg.CLASH_CLAN_TAG, { cacheBust: true });
+  } catch {
+    payload = null;
+  }
+
+  const liveParticipants = payload
+    ? extractParticipants(payload)
+    : new Map<string, ParticipantSnapshot>();
+  if (!payload || liveParticipants.size === 0) {
+    const cap = readLatestMinuteCapture(ctx);
+    const snapParticipants = snapshotRecordToParticipants(cap?.snapshot);
+    if (cap && snapParticipants.size > 0) {
+      payloadFromMinute = true;
+      payload = cap.payload ?? {
+        periodType: cap.periodType,
+        sectionIndex: cap.sectionIndex,
+      };
+    }
+  }
+
+  // Best-effort for supporting data; never block rendering on these.
+  const [log, roster] = await Promise.all([
+    ctx.clash.getRiverRaceLog(ctx.cfg.CLASH_CLAN_TAG, { cacheBust: true }).catch(() => null),
     ctx.clash.getClanMembers(ctx.cfg.CLASH_CLAN_TAG).catch(() => []),
   ]);
+
+  if (!payload) {
+    return {
+      ok: false,
+      errorEmbeds: [
+        infoEmbed(
+          'War data unavailable',
+          'Could not fetch live river race data, and no recent minute snapshot is available yet.',
+        ),
+      ],
+    };
+  }
+
+  // If we are falling back for a live view, ensure the participants come from the minute snapshot.
+  if (payloadFromMinute) {
+    const cap = readLatestMinuteCapture(ctx);
+    const snapParticipants = snapshotRecordToParticipants(cap?.snapshot);
+    // Inject the snapshot participants into payload shape expected by extractParticipants.
+    // We avoid mutating the payload too deeply; only provide the participants array.
+    if (snapParticipants.size > 0) {
+      (payload as any) = {
+        ...(payload as any),
+        clan: {
+          ...(payload as any).clan,
+          participants: Array.from(snapParticipants.entries()).map(([tag, snap]) => ({
+            tag,
+            ...snap,
+          })),
+        },
+      };
+    }
+  }
 
   return renderWarStatsEmbedsFromData(ctx, { parsed, dayArgRaw, payload, log, roster });
 }
@@ -702,6 +867,7 @@ export async function handleWarlogsPublishButton(ctx: AppContext, interaction: B
   const invokerUserId = parts[2] ?? '';
   const kind = parts[3] ?? '';
   const nRaw = parts[4] ?? '0';
+  const token = parts[5] ?? '';
 
   if (!invokerUserId || interaction.user.id !== invokerUserId) {
     await interaction.reply({
@@ -754,14 +920,58 @@ export async function handleWarlogsPublishButton(ctx: AppContext, interaction: B
   }
 
   let render: WarStatsRenderResult;
-  try {
-    render = await renderWarStatsEmbeds(ctx, parsed, null);
-  } catch {
-    await interaction.followUp({
-      content: 'Failed to build war logs right now. Try again shortly.',
-      ephemeral: true,
-    });
-    return;
+  // Prefer cached embeds from the original command run to avoid a second Clash API call.
+  // If the cache is missing/expired, fall back to rendering again.
+  const cacheTtlMs = 15 * 60_000;
+  if (token) {
+    const cache = readPublishCache(ctx, token);
+    const createdAtMs = cache?.createdAtIso ? new Date(cache.createdAtIso).getTime() : NaN;
+    const fresh = cache && Number.isFinite(createdAtMs) && Date.now() - createdAtMs <= cacheTtlMs;
+    const invokerOk = cache?.invokerUserId === invokerUserId;
+
+    if (fresh && invokerOk) {
+      try {
+        const firstEmbeds = (cache.firstEmbeds ?? []).map((e) => EmbedBuilder.from(e));
+        const continuationEmbeds = (cache.continuationEmbeds ?? []).map((e) =>
+          EmbedBuilder.from(e),
+        );
+        render = { ok: true, firstEmbeds, continuationEmbeds };
+      } catch {
+        render = {
+          ok: false,
+          errorEmbeds: [infoEmbed('War logs unavailable', 'Publish cache was invalid.')],
+        };
+      }
+    } else {
+      render = {
+        ok: false,
+        errorEmbeds: [infoEmbed('War logs unavailable', 'Publish cache not found.')],
+      };
+    }
+  } else {
+    render = {
+      ok: false,
+      errorEmbeds: [infoEmbed('War logs unavailable', 'Publish cache not found.')],
+    };
+  }
+
+  if (!render.ok) {
+    try {
+      render = await renderWarStatsEmbeds(ctx, parsed, null);
+    } catch {
+      await interaction.followUp({
+        content: 'Failed to build war logs right now. Try again shortly.',
+        ephemeral: true,
+      });
+      return;
+    }
+  } else if (token) {
+    // Consume cache after successful reuse to keep job_state small.
+    try {
+      deletePublishCache(ctx, token);
+    } catch {
+      // ignore
+    }
   }
 
   if (!render.ok) {
@@ -850,11 +1060,17 @@ function resolveParticipantsForRef(
     const picked = history[0];
     if (!picked) return missingSnapshot('latest war day');
     const dayIdx = typeof picked.e.dayIndex === 'number' ? picked.e.dayIndex : undefined;
-    const dayLabel = dayIdx && dayIdx >= 1 && dayIdx <= 4 ? `War day ${dayIdx}` : 'War day';
+    const pt =
+      typeof picked.e.periodType === 'string'
+        ? picked.e.periodType.trim().toLowerCase()
+        : undefined;
+    const base = pt === 'colosseum' ? 'Colosseum day' : 'War day';
+    const dayLabel = dayIdx ? `${base} ${dayIdx}` : pt === 'colosseum' ? 'Colosseum' : 'War day';
     return {
       label: `Latest — ${dayLabel}`,
       participants: snapshotRecordToMap(picked.e.snapshot as any),
       warDayIndex: dayIdx,
+      periodType: typeof picked.e.periodType === 'string' ? picked.e.periodType : undefined,
       snapshotEndAtMs: picked.t,
       source: 'snapshot',
     };
@@ -866,10 +1082,16 @@ function resolveParticipantsForRef(
     );
     const picked = matches[0];
     if (!picked) return missingSnapshot(`war day ${ref.day}`);
+    const pt =
+      typeof picked.e.periodType === 'string'
+        ? picked.e.periodType.trim().toLowerCase()
+        : undefined;
+    const base = pt === 'colosseum' ? 'Colosseum day' : 'War day';
     return {
-      label: `War day ${ref.day}`,
+      label: `${base} ${ref.day}`,
       participants: snapshotRecordToMap(picked.e.snapshot as any),
       warDayIndex: ref.day,
+      periodType: typeof picked.e.periodType === 'string' ? picked.e.periodType : undefined,
       snapshotEndAtMs: picked.t,
       source: 'snapshot',
     };
@@ -890,11 +1112,15 @@ function resolveParticipantsForRef(
   }
 
   const dayIdx = typeof best.e.dayIndex === 'number' ? best.e.dayIndex : undefined;
-  const dayLabel = dayIdx && dayIdx >= 1 && dayIdx <= 4 ? `War day ${dayIdx}` : 'War day';
+  const pt =
+    typeof best.e.periodType === 'string' ? best.e.periodType.trim().toLowerCase() : undefined;
+  const base = pt === 'colosseum' ? 'Colosseum day' : 'War day';
+  const dayLabel = dayIdx ? `${base} ${dayIdx}` : pt === 'colosseum' ? 'Colosseum' : 'War day';
   return {
     label: `${ref.days} days ago — ${dayLabel}`,
     participants: snapshotRecordToMap(best.e.snapshot as any),
     warDayIndex: dayIdx,
+    periodType: typeof best.e.periodType === 'string' ? best.e.periodType : undefined,
     snapshotEndAtMs: best.t,
     source: 'snapshot',
   };
@@ -972,6 +1198,30 @@ export const WarStatsCommand: SlashCommand = {
     }
 
     const customId = warstatsPublishCustomId(interaction.user.id, parsed);
+    const parts = customId.split(':');
+    const token = parts[5] ?? '';
+    if (token) {
+      try {
+        const kind = parsed?.kind ?? 'default';
+        const n =
+          parsed &&
+          (parsed.kind === 'daysAgo' || parsed.kind === 'warDay' || parsed.kind === 'prepDay')
+            ? parsed.kind === 'daysAgo'
+              ? parsed.days
+              : parsed.day
+            : 0;
+        writePublishCache(ctx, token, {
+          invokerUserId: interaction.user.id,
+          createdAtIso: new Date().toISOString(),
+          parsedKind: kind,
+          parsedN: n,
+          firstEmbeds: render.firstEmbeds.map((e) => e.toJSON()),
+          continuationEmbeds: render.continuationEmbeds.map((e) => e.toJSON()),
+        });
+      } catch {
+        // ignore cache failures; publish button will fall back to re-render.
+      }
+    }
     const row = buildWarstatsPublishRow(customId);
 
     await interaction.editReply({ embeds: render.firstEmbeds, components: [row] });
