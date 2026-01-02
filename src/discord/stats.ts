@@ -8,6 +8,7 @@ import {
   type ChatInputCommandInteraction,
   type ButtonInteraction,
 } from 'discord.js';
+import { randomUUID } from 'crypto';
 import type { SlashCommand } from './commands.js';
 import type { AppContext } from '../types.js';
 import { infoEmbed } from './ui.js';
@@ -17,7 +18,42 @@ function statsPublishCustomId(invokerUserId: string, playerTag: string): string 
     .trim()
     .toUpperCase()
     .replace(/^#/, '');
-  return `publish:stats:${invokerUserId}:${tagNoHash}`;
+  const token = randomUUID();
+  return `publish:stats:${invokerUserId}:${tagNoHash}:${token}`;
+}
+
+type StatsPublishCache = {
+  invokerUserId: string;
+  createdAtIso: string;
+  tagNoHash: string;
+  embeds: any[];
+};
+
+function publishCacheKey(token: string): string {
+  return `stats:publish_cache:${token}`;
+}
+
+function writePublishCache(ctx: AppContext, token: string, cache: StatsPublishCache) {
+  ctx.db
+    .prepare('INSERT OR REPLACE INTO job_state(key, value) VALUES(?, ?)')
+    .run(publishCacheKey(token), JSON.stringify(cache));
+}
+
+function readPublishCache(ctx: AppContext, token: string): StatsPublishCache | null {
+  const raw = ctx.db
+    .prepare('SELECT value FROM job_state WHERE key = ?')
+    .get(publishCacheKey(token)) as { value: string } | undefined;
+  if (!raw?.value) return null;
+  try {
+    const obj = JSON.parse(raw.value);
+    return obj && typeof obj === 'object' ? (obj as StatsPublishCache) : null;
+  } catch {
+    return null;
+  }
+}
+
+function deletePublishCache(ctx: AppContext, token: string) {
+  ctx.db.prepare('DELETE FROM job_state WHERE key = ?').run(publishCacheKey(token));
 }
 
 function buildStatsPublishRow(customId: string, disabled = false) {
@@ -75,6 +111,7 @@ export async function handleStatsPublishButton(ctx: AppContext, interaction: But
   const parts = id.split(':');
   const invokerUserId = parts[2] ?? '';
   const tagPart = parts[3] ?? '';
+  const token = parts[4] ?? '';
 
   if (!invokerUserId || interaction.user.id !== invokerUserId) {
     await interaction.reply({
@@ -110,23 +147,56 @@ export async function handleStatsPublishButton(ctx: AppContext, interaction: But
     }
   }
 
-  const tag = normalizeTag(tagPart);
-  let player: any;
-  try {
-    player = await ctx.clash.getPlayer(tag);
-  } catch {
-    await interaction.followUp({
-      content: `Could not fetch player data for **${tag}** right now. Try again shortly.`,
-      ephemeral: true,
-    });
-    return;
+  const cacheTtlMs = 15 * 60_000;
+  let embeds: EmbedBuilder[] | null = null;
+
+  if (token) {
+    const cache = readPublishCache(ctx, token);
+    const createdAtMs = cache?.createdAtIso ? new Date(cache.createdAtIso).getTime() : NaN;
+    const fresh = cache && Number.isFinite(createdAtMs) && Date.now() - createdAtMs <= cacheTtlMs;
+    const invokerOk = cache?.invokerUserId === invokerUserId;
+    const tagOk =
+      cache?.tagNoHash ===
+      String(tagPart ?? '')
+        .trim()
+        .toUpperCase();
+
+    if (fresh && invokerOk && tagOk) {
+      try {
+        embeds = (cache.embeds ?? []).map((e) => EmbedBuilder.from(e));
+      } catch {
+        embeds = null;
+      }
+    }
   }
 
-  const embed = buildStatsEmbed(player);
+  if (!embeds || embeds.length === 0) {
+    // Fall back to re-fetching (should be rare; e.g. cache expired or bot restarted).
+    const tag = normalizeTag(tagPart);
+    let player: any;
+    try {
+      player = await ctx.clash.getPlayer(tag);
+    } catch {
+      await interaction.followUp({
+        content: `Could not fetch player data for **${tag}** right now. Try again shortly.`,
+        ephemeral: true,
+      });
+      return;
+    }
+    embeds = [buildStatsEmbed(player)];
+  } else if (token) {
+    // Consume cache after successful reuse to keep job_state small.
+    try {
+      deletePublishCache(ctx, token);
+    } catch {
+      // ignore
+    }
+  }
+
   const commandName = (interaction.message as any)?.interaction?.commandName ?? 'stats';
   await interaction.channel.send({
     content: `*${interaction.user.toString()}* used **/${commandName}**:\n`,
-    embeds: [embed],
+    embeds,
   });
 
   try {
@@ -284,6 +354,24 @@ export const StatsCommand: SlashCommand = {
 
     const embed = buildStatsEmbed(player);
     const customId = statsPublishCustomId(interaction.user.id, player.tag);
+    const parts = customId.split(':');
+    const token = parts[4] ?? '';
+    if (token) {
+      try {
+        const tagNoHash = String(player.tag ?? '')
+          .trim()
+          .toUpperCase()
+          .replace(/^#/, '');
+        writePublishCache(ctx, token, {
+          invokerUserId: interaction.user.id,
+          createdAtIso: new Date().toISOString(),
+          tagNoHash,
+          embeds: [embed.toJSON()],
+        });
+      } catch {
+        // ignore cache failures; publish button will fall back to re-fetch.
+      }
+    }
     const row = buildStatsPublishRow(customId);
 
     await interaction.editReply({ embeds: [embed], components: [row] });
