@@ -359,10 +359,35 @@ function inferWarDayIndex(
   const periodType = periodTypeRaw?.trim().toLowerCase();
   const stateRaw = typeof payload?.state === 'string' ? payload.state : undefined;
   const state = stateRaw?.trim().toLowerCase();
+  const isColosseum = periodType === 'colosseum';
+  const isWarBattlePeriod =
+    isColosseum ||
+    periodType === 'warday' ||
+    (!!periodType && periodType.includes('war') && periodType !== 'colosseum') ||
+    (!periodType && state === 'warday');
 
-  // In some "colosseum" weeks, fields like dayIndex/sectionIndex are not a per-day index.
-  // Infer the day from cumulative decks used instead.
-  if (periodType === 'colosseum') {
+  const direct = toFiniteInt(payload?.dayIndex) ?? toFiniteInt(payload?.warDay);
+  if (direct !== undefined) return clampWarDayIndex(direct);
+
+  const sectionIndex = toFiniteInt(payload?.sectionIndex);
+  if (sectionIndex !== undefined) {
+    if (sectionIndex >= 1 && sectionIndex <= 5) return clampWarDayIndex(sectionIndex);
+
+    if (isWarBattlePeriod && sectionIndex >= 0 && sectionIndex <= 4) {
+      const mapped = clampWarDayIndex(sectionIndex + 1);
+      if (mapped !== undefined) return mapped;
+    }
+  }
+
+  const periodIndex = toFiniteInt(payload?.periodIndex);
+  if (periodIndex !== undefined && isWarBattlePeriod) {
+    const rem = periodIndex % 5;
+    const mapped = clampWarDayIndex(rem + 1);
+    if (mapped !== undefined) return mapped;
+  }
+
+  if (isColosseum) {
+    // Fall back to cumulative deck totals when indices are unavailable.
     let maxTotal = 0;
     let maxToday = 0;
     let anyTodayObserved = false;
@@ -378,31 +403,12 @@ function inferWarDayIndex(
       if (today > maxToday) maxToday = today;
     }
 
-    // Special case: immediately after daily reset, totals may still be exactly a multiple of 4,
-    // while the per-day counter is 0. This lets us detect the new day *before* anyone uses a deck.
     const isResetBoundary =
       anyTodayObserved && maxToday === 0 && maxTotal > 0 && maxTotal % 4 === 0;
     const inferred = isResetBoundary
       ? Math.floor(maxTotal / 4) + 1
       : Math.max(1, Math.ceil((maxTotal || 1) / 4));
     return clampWarDayIndex(inferred);
-  }
-
-  const direct = toFiniteInt(payload?.dayIndex) ?? toFiniteInt(payload?.warDay);
-  if (direct !== undefined) return clampWarDayIndex(direct);
-
-  const sectionIndex = toFiniteInt(payload?.sectionIndex);
-  if (sectionIndex !== undefined) {
-    if (sectionIndex >= 1 && sectionIndex <= 5) return sectionIndex;
-
-    const isWarBattlePeriod =
-      periodType === 'warday' ||
-      (!!periodType && periodType.includes('war') && periodType !== 'colosseum') ||
-      (!periodType && state === 'warday');
-
-    if (isWarBattlePeriod && sectionIndex >= 0 && sectionIndex <= 4) {
-      return clampWarDayIndex(sectionIndex + 1);
-    }
   }
 
   // No further inference for regular war days (avoid guessing from deck totals).
