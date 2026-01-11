@@ -30,6 +30,8 @@ import { maybeRunNicknameToTagMigration } from './discord/nicknameMigration.js';
 import { listGuildMembersPage } from './discord/guildMembers.js';
 import { dbDeleteJobState, dbGetJobState, dbSetJobState } from './db.js';
 
+console.log('Testing...');
+
 const cfg = loadConfig();
 const db = openDb(cfg.SQLITE_PATH);
 migrate(db);
