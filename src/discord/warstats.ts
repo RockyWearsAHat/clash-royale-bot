@@ -395,10 +395,36 @@ function inferCurrentDayIndex(payload: any): number | undefined {
   const periodType = periodTypeRaw?.trim().toLowerCase();
   const stateRaw = typeof payload?.state === 'string' ? payload.state : undefined;
   const state = stateRaw?.trim().toLowerCase();
+  const isColosseum = periodType === 'colosseum';
+  const isWarBattlePeriod =
+    isColosseum ||
+    periodType === 'warday' ||
+    (!!periodType && periodType.includes('war') && periodType !== 'colosseum') ||
+    (!periodType && state === 'warday');
 
-  // In some "colosseum" weeks, fields like dayIndex/sectionIndex are not a per-day index.
-  // Infer the day from cumulative decks used instead.
-  if (periodType === 'colosseum') {
+  // Many payloads expose a 1-based warDay/dayIndex. Prefer those.
+  const direct = toFiniteInt(payload?.dayIndex) ?? toFiniteInt(payload?.warDay);
+  if (direct !== undefined) return direct;
+
+  // Some variants use sectionIndex (1..4); treat that as day index.
+  const sectionIndex = toFiniteInt(payload?.sectionIndex);
+  if (sectionIndex !== undefined) {
+    if (sectionIndex >= 1 && sectionIndex <= 5) return clampWarDayIndex(sectionIndex);
+
+    if (isWarBattlePeriod && sectionIndex >= 0 && sectionIndex <= 4) {
+      const mapped = clampWarDayIndex(sectionIndex + 1);
+      if (mapped !== undefined) return mapped;
+    }
+  }
+
+  const periodIndex = toFiniteInt(payload?.periodIndex);
+  if (periodIndex !== undefined && isWarBattlePeriod) {
+    const rem = periodIndex % 5;
+    const mapped = clampWarDayIndex(rem + 1);
+    if (mapped !== undefined) return mapped;
+  }
+
+  if (isColosseum) {
     const participants = extractParticipants(payload);
     let maxTotal = 0;
     for (const snap of participants.values()) {
@@ -408,25 +434,6 @@ function inferCurrentDayIndex(payload: any): number | undefined {
     }
     const inferred = Math.max(1, Math.ceil((maxTotal || 1) / 4));
     return clampWarDayIndex(inferred);
-  }
-
-  // Many payloads expose a 1-based warDay/dayIndex. Prefer those.
-  const direct = toFiniteInt(payload?.dayIndex) ?? toFiniteInt(payload?.warDay);
-  if (direct !== undefined) return direct;
-
-  // Some variants use sectionIndex (1..4); treat that as day index.
-  const sectionIndex = toFiniteInt(payload?.sectionIndex);
-  if (sectionIndex !== undefined) {
-    if (sectionIndex >= 1 && sectionIndex <= 5) return sectionIndex;
-
-    const isWarBattlePeriod =
-      periodType === 'warday' ||
-      (!!periodType && periodType.includes('war') && periodType !== 'colosseum') ||
-      (!periodType && state === 'warday');
-
-    if (isWarBattlePeriod && sectionIndex >= 0 && sectionIndex <= 4) {
-      return clampWarDayIndex(sectionIndex + 1);
-    }
   }
 
   // No further inference for regular war days (avoid guessing from deck totals).
