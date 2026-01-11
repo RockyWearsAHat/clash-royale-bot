@@ -36,6 +36,9 @@ migrate(db);
 
 const clash = new ClashApi(cfg.CLASH_API_TOKEN);
 
+//This is a new comment testing continious deployment via the windows-service-manager
+//This is to test if new pulls are made from github as a service without the UI being open
+
 const ctx: AppContext = { cfg, db, clash };
 
 const client = new Client({
