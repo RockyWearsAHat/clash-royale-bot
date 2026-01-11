@@ -393,6 +393,8 @@ function toFiniteInt(v: unknown): number | undefined {
 function inferCurrentDayIndex(payload: any): number | undefined {
   const periodTypeRaw = typeof payload?.periodType === 'string' ? payload.periodType : undefined;
   const periodType = periodTypeRaw?.trim().toLowerCase();
+  const stateRaw = typeof payload?.state === 'string' ? payload.state : undefined;
+  const state = stateRaw?.trim().toLowerCase();
 
   // In some "colosseum" weeks, fields like dayIndex/sectionIndex are not a per-day index.
   // Infer the day from cumulative decks used instead.
@@ -414,7 +416,18 @@ function inferCurrentDayIndex(payload: any): number | undefined {
 
   // Some variants use sectionIndex (1..4); treat that as day index.
   const sectionIndex = toFiniteInt(payload?.sectionIndex);
-  if (sectionIndex !== undefined && sectionIndex >= 1 && sectionIndex <= 5) return sectionIndex;
+  if (sectionIndex !== undefined) {
+    if (sectionIndex >= 1 && sectionIndex <= 5) return sectionIndex;
+
+    const isWarBattlePeriod =
+      periodType === 'warday' ||
+      (!!periodType && periodType.includes('war') && periodType !== 'colosseum') ||
+      (!periodType && state === 'warday');
+
+    if (isWarBattlePeriod && sectionIndex >= 0 && sectionIndex <= 4) {
+      return clampWarDayIndex(sectionIndex + 1);
+    }
+  }
 
   // No further inference for regular war days (avoid guessing from deck totals).
   return undefined;
