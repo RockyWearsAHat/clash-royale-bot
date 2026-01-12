@@ -19,7 +19,7 @@ import type { SlashCommand } from './commands.js';
 import type { AppContext } from '../types.js';
 import { dbDeleteJobState, dbGetJobState, dbSetJobState } from '../db.js';
 import type { ClashClanMemberRole, ClashPlayer } from '../clashApi.js';
-import { enforceLinkedMemberRoles } from './roleSync.js';
+import { enforceLinkedMemberRoles, enforceUnlinkedMemberRoleReset } from './roleSync.js';
 
 const TAG_RE = /#?[0289PYLQGRJCUV]{5,}/i;
 type DisplayPreference = 'discord' | 'discord_with_clash' | 'clash' | 'custom';
@@ -417,6 +417,10 @@ async function cleanupThreadMessagesKeep(thread: ThreadChannel, keepMessageIds: 
     if (deletions.length >= 25) break;
   }
   await Promise.all(deletions);
+}
+
+function scheduleThreadCleanupKeep(thread: ThreadChannel, keepMessageIds: string[]) {
+  cleanupThreadMessagesKeep(thread, keepMessageIds).catch(() => undefined);
 }
 
 async function closeOtherThreadsForUser(
@@ -852,7 +856,7 @@ async function getOrCreateVerificationThread(
       // Ensure control message exists and thread is clean (best-effort).
       await renderOrUpdateProfileMessage(ctx, existing, userId);
       const uiId = dbGetJobState(ctx.db, `profile:uiMessage:${userId}`) ?? '';
-      await cleanupThreadMessagesKeep(existing, [uiId]);
+      scheduleThreadCleanupKeep(existing, [uiId]);
       return existing;
     }
   }
@@ -874,7 +878,7 @@ async function getOrCreateVerificationThread(
 
   await renderOrUpdateProfileMessage(ctx, thread, userId);
   const uiId = dbGetJobState(ctx.db, `profile:uiMessage:${userId}`) ?? '';
-  await cleanupThreadMessagesKeep(thread, [uiId]);
+  scheduleThreadCleanupKeep(thread, [uiId]);
   return thread;
 }
 
@@ -1123,7 +1127,7 @@ export async function repairVerificationThreadsOnce(ctx: AppContext, client: any
     // Best-effort: ensure UI is present and keep the thread clean.
     await renderOrUpdateProfileMessage(ctx, thread, userId);
     const uiId = dbGetJobState(ctx.db, `profile:uiMessage:${userId}`) ?? '';
-    await cleanupThreadMessagesKeep(thread, [uiId]);
+    scheduleThreadCleanupKeep(thread, [uiId]);
 
     await new Promise((r) => setTimeout(r, 150));
   }
@@ -1298,7 +1302,7 @@ export async function handleVerificationThreadMessage(ctx: AppContext, msg: any)
     await msg.delete().catch(() => undefined);
     await renderOrUpdateProfileMessage(ctx, thread, msg.author.id);
     const uiId = dbGetJobState(ctx.db, `profile:uiMessage:${msg.author.id}`) ?? '';
-    await cleanupThreadMessagesKeep(thread, [uiId]);
+    scheduleThreadCleanupKeep(thread, [uiId]);
     return;
   }
 
@@ -1309,7 +1313,7 @@ export async function handleVerificationThreadMessage(ctx: AppContext, msg: any)
     await msg.delete().catch(() => undefined);
     await renderOrUpdateProfileMessage(ctx, thread, msg.author.id);
     const uiId = dbGetJobState(ctx.db, `profile:uiMessage:${msg.author.id}`) ?? '';
-    await cleanupThreadMessagesKeep(thread, [uiId]);
+    scheduleThreadCleanupKeep(thread, [uiId]);
     return;
   }
 
@@ -1395,9 +1399,9 @@ export async function handleVerificationThreadMessage(ctx: AppContext, msg: any)
 
   if (confirmation) {
     dbSetJobState(ctx.db, pendingTagMessageKey(msg.author.id), confirmation.id);
-    await cleanupThreadMessagesKeep(thread, [uiId, confirmation.id]);
+    scheduleThreadCleanupKeep(thread, [uiId, confirmation.id]);
   } else {
-    await cleanupThreadMessagesKeep(thread, [uiId]);
+    scheduleThreadCleanupKeep(thread, [uiId]);
   }
 }
 
@@ -1460,7 +1464,7 @@ export async function handleVerifyTagButton(ctx: AppContext, interaction: Button
       .catch(() => undefined);
     const uiId = dbGetJobState(ctx.db, `profile:uiMessage:${userId}`);
     if (uiId) keepIds.add(uiId);
-    await cleanupThreadMessagesKeep(channel as ThreadChannel, [...keepIds]);
+    scheduleThreadCleanupKeep(channel as ThreadChannel, [...keepIds]);
     setTimeout(() => interaction.message?.delete().catch(() => undefined), 5_000);
     return;
   }
@@ -1484,7 +1488,7 @@ export async function handleVerifyTagButton(ctx: AppContext, interaction: Button
       .catch(() => undefined);
     const uiId = dbGetJobState(ctx.db, `profile:uiMessage:${userId}`);
     if (uiId) keepIds.add(uiId);
-    await cleanupThreadMessagesKeep(channel as ThreadChannel, [...keepIds]);
+    scheduleThreadCleanupKeep(channel as ThreadChannel, [...keepIds]);
     setTimeout(() => interaction.message?.delete().catch(() => undefined), 8_000);
     return;
   }
@@ -1503,7 +1507,7 @@ export async function handleVerifyTagButton(ctx: AppContext, interaction: Button
       .catch(() => undefined);
     const uiId = dbGetJobState(ctx.db, `profile:uiMessage:${userId}`);
     if (uiId) keepIds.add(uiId);
-    await cleanupThreadMessagesKeep(channel as ThreadChannel, [...keepIds]);
+    scheduleThreadCleanupKeep(channel as ThreadChannel, [...keepIds]);
     setTimeout(() => interaction.message?.delete().catch(() => undefined), 12_000);
     return;
   }
@@ -1532,7 +1536,7 @@ export async function handleVerifyTagButton(ctx: AppContext, interaction: Button
     })
     .catch(() => undefined);
 
-  await cleanupThreadMessagesKeep(channel as ThreadChannel, [...keepIds]);
+  scheduleThreadCleanupKeep(channel as ThreadChannel, [...keepIds]);
 
   // Immediately sync Discord roles so users see the correct access without waiting for cron.
   try {
@@ -1821,36 +1825,52 @@ export async function handleProfileInteraction(ctx: AppContext, interaction: But
     dbDeleteJobState(ctx.db, `profile:uiMessage:${userId}`);
     dbDeleteJobState(ctx.db, nicknameMenuStateKey(userId));
 
-    let thread: ThreadChannel | null = null;
-    try {
-      thread = await ensureVerificationThreadForUser(ctx, interaction.client, userId);
-    } catch {
-      thread = null;
+    const liveThread =
+      interaction.channel?.isThread?.() &&
+      interaction.channel.parentId === ctx.cfg.CHANNEL_VERIFICATION_ID
+        ? (interaction.channel as ThreadChannel)
+        : null;
+
+    let thread: ThreadChannel | null = liveThread;
+    if (!thread) {
+      try {
+        thread = await ensureVerificationThreadForUser(ctx, interaction.client, userId);
+      } catch {
+        thread = null;
+      }
     }
 
-    // Best-effort: strip clan roles and remove onboarding-access role so only the verification channel remains.
+    // Best-effort: strip every removable role immediately.
     try {
       const member = await guild.members.fetch(userId);
-
-      const removableRoles = member.roles.cache.filter((role) => {
-        if (role.id === guild.id) return false; // @everyone
-        if (role.managed) return false; // integration roles (e.g., boosters)
-        return true;
-      });
-      if (removableRoles.size) {
-        await member.roles.remove(Array.from(removableRoles.keys())).catch(() => undefined);
-      }
+      await enforceUnlinkedMemberRoleReset(ctx, member);
     } catch {
       // ignore
     }
 
     if (thread) {
+      const setupName = `Verification — ${interaction.user.username}`.slice(0, 90);
+      await thread.setName(setupName).catch(() => undefined);
+
+      const priorUiId = dbGetJobState(ctx.db, `profile:uiMessage:${userId}`);
+      if (priorUiId) {
+        await deleteMessageIfExists(thread, priorUiId);
+        dbDeleteJobState(ctx.db, `profile:uiMessage:${userId}`);
+      }
+
+      await renderOrUpdateProfileMessage(ctx, thread, userId);
       const uiId = dbGetJobState(ctx.db, `profile:uiMessage:${userId}`) ?? '';
-      await cleanupThreadMessagesKeep(thread, [uiId]).catch(() => undefined);
+      scheduleThreadCleanupKeep(thread, [uiId]);
     }
 
-    await interaction.editReply({ content: '', embeds: [], components: [] }).catch(() => undefined);
-    await interaction.deleteReply().catch(() => undefined);
+    await interaction
+      .editReply({
+        content: 'Unlinked. Paste your Clash Royale tag again to restart verification.',
+        embeds: [],
+        components: [],
+      })
+      .catch(() => undefined);
+    setTimeout(() => interaction.deleteReply().catch(() => undefined), 10_000);
   }
 }
 
