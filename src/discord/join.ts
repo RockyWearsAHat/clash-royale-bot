@@ -79,6 +79,7 @@ type PendingTagState = {
 
 const pendingTagKey = (userId: string) => `verify:pendingTag:${userId}`;
 const pendingTagMessageKey = (userId: string) => `verify:pendingTagMessage:${userId}`;
+const invalidTagMessageKey = (userId: string) => `verify:invalidTagMessage:${userId}`;
 
 function storePendingTag(ctx: AppContext, userId: string, state: PendingTagState) {
   dbSetJobState(ctx.db, pendingTagKey(userId), JSON.stringify(state));
@@ -1317,6 +1318,11 @@ export async function handleVerificationThreadMessage(ctx: AppContext, msg: any)
     player = await ctx.clash.getPlayer(tag);
   } catch (err) {
     await msg.delete().catch(() => undefined);
+    const existingId = dbGetJobState(ctx.db, invalidTagMessageKey(msg.author.id));
+    if (existingId) {
+      await deleteMessageIfExists(thread, existingId);
+      dbDeleteJobState(ctx.db, invalidTagMessageKey(msg.author.id));
+    }
     const reply = await thread
       .send({
         content: `<@${msg.author.id}> I couldn’t find that tag. Double-check the characters (0 vs O, 2 vs Z) and try again.`,
@@ -1324,7 +1330,13 @@ export async function handleVerificationThreadMessage(ctx: AppContext, msg: any)
       })
       .catch(() => null);
     if (reply) {
-      setTimeout(() => reply.delete().catch(() => undefined), 20_000);
+      dbSetJobState(ctx.db, invalidTagMessageKey(msg.author.id), reply.id);
+      setTimeout(() => {
+        reply
+          .delete()
+          .catch(() => undefined)
+          .finally(() => dbDeleteJobState(ctx.db, invalidTagMessageKey(msg.author.id)));
+      }, 20_000);
     }
     return;
   }
@@ -1479,6 +1491,7 @@ export async function handleVerifyTagButton(ctx: AppContext, interaction: Button
   const linkResult = linkUserToPlayer(ctx, userId, player);
   if (!linkResult.ok) {
     clearPendingTag(ctx, userId);
+    dbDeleteJobState(ctx.db, invalidTagMessageKey(userId));
     await interaction
       .update({
         content:
@@ -1495,6 +1508,7 @@ export async function handleVerifyTagButton(ctx: AppContext, interaction: Button
   }
 
   clearPendingTag(ctx, userId);
+  dbDeleteJobState(ctx.db, invalidTagMessageKey(userId));
 
   await (channel as ThreadChannel)
     .setName(`Profile - ${player.name}`.slice(0, 90))
