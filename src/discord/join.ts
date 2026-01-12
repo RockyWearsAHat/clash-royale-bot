@@ -111,6 +111,44 @@ function isPlayerTagConstraintError(err: unknown): boolean {
   return message.includes('player_tag');
 }
 
+async function refreshProfileThreadForUser(
+  ctx: AppContext,
+  client: any,
+  userId: string,
+): Promise<ThreadChannel | null> {
+  let thread: ThreadChannel | null = null;
+  try {
+    thread = await ensureVerificationThreadForUser(ctx, client, userId);
+  } catch {
+    return null;
+  }
+
+  const user = await client.users.fetch(userId).catch(() => null);
+  const username = user?.username ?? 'Discord Username';
+  const linkRow = getLinkRow(ctx, userId);
+
+  if (linkRow) {
+    await thread
+      .setName(`Profile - ${linkRow.player_name ?? username}`.slice(0, 90))
+      .catch(() => undefined);
+  } else {
+    const setupName = `Verification — ${username}`.slice(0, 90);
+    await thread.setName(setupName).catch(() => undefined);
+  }
+
+  const priorUiId = dbGetJobState(ctx.db, `profile:uiMessage:${userId}`);
+  if (priorUiId) {
+    await deleteMessageIfExists(thread, priorUiId);
+    dbDeleteJobState(ctx.db, `profile:uiMessage:${userId}`);
+  }
+
+  await renderOrUpdateProfileMessage(ctx, thread, userId);
+  const uiId = dbGetJobState(ctx.db, `profile:uiMessage:${userId}`) ?? '';
+  if (uiId) scheduleThreadCleanupKeep(thread, [uiId]);
+
+  return thread;
+}
+
 function linkUserToPlayer(
   ctx: AppContext,
   userId: string,
@@ -1560,17 +1598,7 @@ export async function handleVerifyTagButton(ctx: AppContext, interaction: Button
 
   clearPendingTag(ctx, userId);
   dbDeleteJobState(ctx.db, invalidTagMessageKey(userId));
-
-  await (channel as ThreadChannel)
-    .setName(`Profile - ${player.name}`.slice(0, 90))
-    .catch(() => undefined);
-
-  const priorUiId = dbGetJobState(ctx.db, `profile:uiMessage:${userId}`);
-  if (priorUiId) {
-    await deleteMessageIfExists(channel as ThreadChannel, priorUiId);
-    dbDeleteJobState(ctx.db, `profile:uiMessage:${userId}`);
-  }
-  await renderOrUpdateProfileMessage(ctx, channel as ThreadChannel, userId);
+  const thread = await refreshProfileThreadForUser(ctx, interaction.client, userId);
   const uiId = dbGetJobState(ctx.db, `profile:uiMessage:${userId}`);
   if (uiId) keepIds.add(uiId);
 
@@ -1871,21 +1899,6 @@ export async function handleProfileInteraction(ctx: AppContext, interaction: But
     dbDeleteJobState(ctx.db, `profile:uiMessage:${userId}`);
     dbDeleteJobState(ctx.db, nicknameMenuStateKey(userId));
 
-    const liveThread =
-      interaction.channel?.isThread?.() &&
-      interaction.channel.parentId === ctx.cfg.CHANNEL_VERIFICATION_ID
-        ? (interaction.channel as ThreadChannel)
-        : null;
-
-    let thread: ThreadChannel | null = liveThread;
-    if (!thread) {
-      try {
-        thread = await ensureVerificationThreadForUser(ctx, interaction.client, userId);
-      } catch {
-        thread = null;
-      }
-    }
-
     // Best-effort: strip every removable role immediately.
     try {
       const member = await guild.members.fetch(userId);
@@ -1894,29 +1907,21 @@ export async function handleProfileInteraction(ctx: AppContext, interaction: But
       // ignore
     }
 
-    if (thread) {
-      const setupName = `Verification — ${interaction.user.username}`.slice(0, 90);
-      await thread.setName(setupName).catch(() => undefined);
+    const thread = await refreshProfileThreadForUser(ctx, interaction.client, userId);
 
-      const priorUiId = dbGetJobState(ctx.db, `profile:uiMessage:${userId}`);
-      if (priorUiId) {
-        await deleteMessageIfExists(thread, priorUiId);
-        dbDeleteJobState(ctx.db, `profile:uiMessage:${userId}`);
-      }
-
-      await renderOrUpdateProfileMessage(ctx, thread, userId);
-      const uiId = dbGetJobState(ctx.db, `profile:uiMessage:${userId}`) ?? '';
-      scheduleThreadCleanupKeep(thread, [uiId]);
+    // Update the confirmation message (thread or ephemeral) and then delete it.
+    const targetMessage = interaction.message as any;
+    if (targetMessage) {
+      await targetMessage
+        .edit({
+          content:
+            'Unlinked. Paste your Clash Royale tag again in this thread to restart verification.',
+          embeds: [],
+          components: [],
+        })
+        .catch(() => undefined);
+      setTimeout(() => targetMessage.delete().catch(() => undefined), 8_000);
     }
-
-    await interaction
-      .editReply({
-        content: 'Unlinked. Paste your Clash Royale tag again to restart verification.',
-        embeds: [],
-        components: [],
-      })
-      .catch(() => undefined);
-    setTimeout(() => interaction.deleteReply().catch(() => undefined), 10_000);
   }
 }
 
