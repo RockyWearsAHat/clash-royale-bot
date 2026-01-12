@@ -1909,18 +1909,32 @@ export async function handleProfileInteraction(ctx: AppContext, interaction: But
 
     const thread = await refreshProfileThreadForUser(ctx, interaction.client, userId);
 
-    // Update the confirmation message (thread or ephemeral) and then delete it.
-    const targetMessage = interaction.message as any;
-    if (targetMessage) {
-      await targetMessage
-        .edit({
+    // Update the confirmation UI and then remove it. Prefer the
+    // interaction reply API (works for ephemeral), and fall back to
+    // editing/deleting the underlying message if needed.
+    try {
+      await interaction
+        .editReply({
           content:
             'Unlinked. Paste your Clash Royale tag again in this thread to restart verification.',
           embeds: [],
           components: [],
         })
         .catch(() => undefined);
-      setTimeout(() => targetMessage.delete().catch(() => undefined), 8_000);
+      setTimeout(() => interaction.deleteReply().catch(() => undefined), 8_000);
+    } catch {
+      const targetMessage = interaction.message as any;
+      if (targetMessage) {
+        await targetMessage
+          .edit({
+            content:
+              'Unlinked. Paste your Clash Royale tag again in this thread to restart verification.',
+            embeds: [],
+            components: [],
+          })
+          .catch(() => undefined);
+        setTimeout(() => targetMessage.delete().catch(() => undefined), 8_000);
+      }
     }
   }
 }
