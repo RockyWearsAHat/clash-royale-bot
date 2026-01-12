@@ -578,16 +578,13 @@ async function renderOrUpdateProfileMessage(
     components = [makeMainProfileButtons(userId, currentNick)];
   }
 
-  // Only create if missing; avoid updating this message so it never shows “edited”.
   if (uiId) {
     const exists = await thread.messages.fetch(uiId).catch(() => null);
     if (exists) {
-      // Upgrade legacy Open Menu messages in-place once.
-      if (row && isLegacyOpenMenuMessage(userId, exists)) {
-        await exists
-          .edit({ content: '', embeds: [embed], components } as any)
-          .catch(() => undefined);
-      }
+      // Always ensure the static profile message matches current link state
+      // so we don't show "Linked to ..." while the user is unlinked (or
+      // vice versa).
+      await exists.edit({ content: '', embeds: [embed], components } as any).catch(() => undefined);
       return;
     }
   }
@@ -1518,13 +1515,18 @@ export async function handleVerifyTagButton(ctx: AppContext, interaction: Button
     return;
   }
 
+  // Confirm may need to hit the Clash API and do several
+  // Discord/DB operations; defer the update immediately so
+  // Discord doesn't treat the interaction as timed out.
+  await interaction.deferUpdate().catch(() => undefined);
+
   let player: ClashPlayer;
   try {
     player = await ctx.clash.getPlayer(pending.tag);
   } catch {
     clearPendingTag(ctx, userId);
     await interaction
-      .update({
+      .editReply({
         content: 'The Clash Royale API could not confirm that tag. Paste your tag again to retry.',
         embeds: [],
         components: [],
@@ -1542,7 +1544,7 @@ export async function handleVerifyTagButton(ctx: AppContext, interaction: Button
     clearPendingTag(ctx, userId);
     dbDeleteJobState(ctx.db, invalidTagMessageKey(userId));
     await interaction
-      .update({
+      .editReply({
         content:
           'That Clash Royale tag is already linked to another Discord member. Contact a leader if this is unexpected.',
         embeds: [],
@@ -1573,7 +1575,7 @@ export async function handleVerifyTagButton(ctx: AppContext, interaction: Button
   if (uiId) keepIds.add(uiId);
 
   await interaction
-    .update({
+    .editReply({
       content: `Linked to **${player.name} (${player.tag})**. Roles will update shortly.`,
       embeds: [],
       components: [],
