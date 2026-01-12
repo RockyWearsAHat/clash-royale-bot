@@ -2,7 +2,7 @@ import { SlashCommandBuilder, type ChatInputCommandInteraction } from 'discord.j
 import type { SlashCommand } from './commands.js';
 import type { AppContext } from '../types.js';
 import { successEmbed } from './ui.js';
-import { enforceUnlinkedMemberVanquished } from './roleSync.js';
+import { enforceUnlinkedMemberRoleReset } from './roleSync.js';
 
 export const UnlinkCommand: SlashCommand = {
   data: new SlashCommandBuilder()
@@ -15,7 +15,7 @@ export const UnlinkCommand: SlashCommand = {
     try {
       const guild = await interaction.client.guilds.fetch(ctx.cfg.GUILD_ID);
       const member = await guild.members.fetch(interaction.user.id);
-      await enforceUnlinkedMemberVanquished(ctx, member);
+      await enforceUnlinkedMemberRoleReset(ctx, member);
     } catch {
       // ignore
     }

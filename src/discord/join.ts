@@ -18,7 +18,8 @@ import {
 import type { SlashCommand } from './commands.js';
 import type { AppContext } from '../types.js';
 import { dbDeleteJobState, dbGetJobState, dbSetJobState } from '../db.js';
-import type { ClashPlayer } from '../clashApi.js';
+import type { ClashClanMemberRole, ClashPlayer } from '../clashApi.js';
+import { enforceLinkedMemberRoles } from './roleSync.js';
 
 const TAG_RE = /#?[0289PYLQGRJCUV]{5,}/i;
 type DisplayPreference = 'discord' | 'discord_with_clash' | 'clash' | 'custom';
@@ -1533,6 +1534,22 @@ export async function handleVerifyTagButton(ctx: AppContext, interaction: Button
 
   await cleanupThreadMessagesKeep(channel as ThreadChannel, [...keepIds]);
 
+  // Immediately sync Discord roles so users see the correct access without waiting for cron.
+  try {
+    const guild = await interaction.client.guilds.fetch(ctx.cfg.GUILD_ID);
+    const member = await guild.members.fetch(userId);
+    let clanRole: ClashClanMemberRole | undefined;
+    if (
+      player.clan?.tag &&
+      player.clan.tag.toUpperCase() === ctx.cfg.CLASH_CLAN_TAG.toUpperCase()
+    ) {
+      clanRole = player.clan.role as ClashClanMemberRole | undefined;
+    }
+    await enforceLinkedMemberRoles(ctx, member, clanRole);
+  } catch {
+    // ignore; cron-based sync will catch up shortly
+  }
+
   setTimeout(() => interaction.message?.delete().catch(() => undefined), 12_000);
 }
 
@@ -1815,17 +1832,13 @@ export async function handleProfileInteraction(ctx: AppContext, interaction: But
     try {
       const member = await guild.members.fetch(userId);
 
-      const clanRoleIds = [
-        ctx.cfg.ROLE_MEMBER_ID,
-        ctx.cfg.ROLE_ELDER_ID,
-        ctx.cfg.ROLE_COLEADER_ID,
-        ctx.cfg.ROLE_LEADER_ID,
-      ];
-      const toRemove = clanRoleIds.filter((rid) => member.roles.cache.has(rid));
-      if (toRemove.length) await member.roles.remove(toRemove).catch(() => undefined);
-
-      if (member.roles.cache.has(ctx.cfg.ROLE_NON_MEMBER_ID)) {
-        await member.roles.remove(ctx.cfg.ROLE_NON_MEMBER_ID).catch(() => undefined);
+      const removableRoles = member.roles.cache.filter((role) => {
+        if (role.id === guild.id) return false; // @everyone
+        if (role.managed) return false; // integration roles (e.g., boosters)
+        return true;
+      });
+      if (removableRoles.size) {
+        await member.roles.remove(Array.from(removableRoles.keys())).catch(() => undefined);
       }
     } catch {
       // ignore

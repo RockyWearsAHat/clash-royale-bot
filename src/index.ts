@@ -26,7 +26,7 @@ import { NotifyNoMoreCommand, NotifyWhenSpotCommand } from './discord/spotNotify
 import { PingUnusedDecksCommand } from './discord/pingUnusedDecks.js';
 import { startScheduler } from './jobs/scheduler.js';
 import { enforceChannelPermissions } from './discord/permissions.js';
-import { syncRolesOnce, enforceUnlinkedMemberVanquished } from './discord/roleSync.js';
+import { syncRolesOnce, enforceUnlinkedMemberRoleReset } from './discord/roleSync.js';
 import { maybeRunNicknameToTagMigration } from './discord/nicknameMigration.js';
 import { listGuildMembersPage } from './discord/guildMembers.js';
 import { dbDeleteJobState, dbGetJobState, dbSetJobState } from './db.js';
@@ -69,7 +69,7 @@ client.on('guildMemberAdd', async (member) => {
     if (linked) return;
 
     // Unlinked users should immediately be isolated to verification threads only.
-    await enforceUnlinkedMemberVanquished(ctx, member);
+    await enforceUnlinkedMemberRoleReset(ctx, member);
 
     await ensureVerificationThreadForUser(ctx, client, member.id);
   } catch {
@@ -209,7 +209,7 @@ client.once('ready', async () => {
             if (member.user.bot) continue;
             if (linkedIds.has(member.id)) continue;
 
-            await enforceUnlinkedMemberVanquished(ctx, member);
+            await enforceUnlinkedMemberRoleReset(ctx, member);
             await ensureVerificationThreadForUser(ctx, client, member.id);
             await new Promise((r) => setTimeout(r, 250));
           }
@@ -220,6 +220,14 @@ client.once('ready', async () => {
 
         dbSetJobState(ctx.db, scanDoneKey, 'true');
         dbDeleteJobState(ctx.db, scanAfterKey);
+      }
+
+      // Always run one lightweight pass for newly joined unlinked users, even if the initial scan completed.
+      const recentPage = await listGuildMembersPage(guild, { limit: 1000 });
+      for (const member of recentPage) {
+        if (member.user.bot) continue;
+        if (linkedIds.has(member.id)) continue;
+        await enforceUnlinkedMemberRoleReset(ctx, member);
       }
 
       // Final cleanup: the unlinked scan can create new threads; delete any bot-only or unusable ones.
