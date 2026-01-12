@@ -1374,7 +1374,7 @@ export async function handleVerificationThreadMessage(ctx: AppContext, msg: any)
   // checked before we hit the Clash API.
   const loading = await thread
     .send({
-      content: `<@${msg.author.id}> Validating your Clash Royale tag a0 a0(this may take a few seconds a0 a0 a0)…`,
+      content: `<@${msg.author.id}> Validating your Clash Royale tag… (this may take a few seconds)`,
       allowedMentions: { users: [msg.author.id] },
     })
     .catch(() => null);
@@ -1547,41 +1547,16 @@ export async function handleVerifyTagButton(ctx: AppContext, interaction: Button
     return;
   }
 
-  // Confirm may need to hit the Clash API and do several
-  // Discord/DB operations; defer the update immediately so
-  // Discord doesn't treat the interaction as timed out.
+  // Confirm may need to do several Discord/DB operations; defer the
+  // update immediately so Discord doesn't treat the interaction as
+  // timed out. We already validated the tag when it was pasted, so we
+  // do not re-call the Clash API here.
   await interaction.deferUpdate().catch(() => undefined);
 
-  // Show a quick in-thread loading state so users know the bot is
-  // talking to the Clash Royale API and don't paste their tag again.
-  await interaction
-    .editReply({
-      content: 'Validating your Clash Royale tag with the Clash API. This can take a few seconds…',
-      embeds: [],
-      components: [],
-    })
-    .catch(() => undefined);
-
-  let player: ClashPlayer;
-  try {
-    player = await ctx.clash.getPlayer(pending.tag);
-  } catch {
-    clearPendingTag(ctx, userId);
-    await interaction
-      .editReply({
-        content: 'The Clash Royale API could not confirm that tag. Paste your tag again to retry.',
-        embeds: [],
-        components: [],
-      })
-      .catch(() => undefined);
-    const uiId = dbGetJobState(ctx.db, `profile:uiMessage:${userId}`);
-    if (uiId) keepIds.add(uiId);
-    scheduleThreadCleanupKeep(channel as ThreadChannel, [...keepIds]);
-    setTimeout(() => interaction.message?.delete().catch(() => undefined), 8_000);
-    return;
-  }
-
-  const linkResult = linkUserToPlayer(ctx, userId, player);
+  const linkResult = linkUserToPlayer(ctx, userId, {
+    tag: pending.tag,
+    name: pending.playerName,
+  } as ClashPlayer);
   if (!linkResult.ok) {
     clearPendingTag(ctx, userId);
     dbDeleteJobState(ctx.db, invalidTagMessageKey(userId));
@@ -1610,7 +1585,9 @@ export async function handleVerifyTagButton(ctx: AppContext, interaction: Button
   if (channel.isThread?.() && channel.parentId === ctx.cfg.CHANNEL_VERIFICATION_ID) {
     const thread = channel as ThreadChannel;
     try {
-      await thread.setName(`Profile - ${player.name}`.slice(0, 90)).catch(() => undefined);
+      await thread
+        .setName(`Profile - ${pending.playerName}`.slice(0, 90))
+        .catch(() => undefined);
     } catch {
       // ignore rename errors
     }
@@ -1633,7 +1610,7 @@ export async function handleVerifyTagButton(ctx: AppContext, interaction: Button
 
   await interaction
     .editReply({
-      content: `Linked to **${player.name} (${player.tag})**. Roles will update shortly.`,
+      content: `Linked to **${pending.playerName} (${pending.tag})**. Roles will update shortly.`,
       embeds: [],
       components: [],
     })
@@ -1641,16 +1618,14 @@ export async function handleVerifyTagButton(ctx: AppContext, interaction: Button
 
   // Immediately sync Discord roles so users see the correct access without waiting for cron.
   // Immediately sync Discord roles so this member's access reflects the
-  // new linked state without waiting for cron.
+  // new linked state without waiting for cron, using the clan snapshot
+  // we captured when the tag was first pasted.
   try {
     const guild = await interaction.client.guilds.fetch(ctx.cfg.GUILD_ID);
     const member = await guild.members.fetch(userId);
     let clanRole: ClashClanMemberRole | undefined;
-    if (
-      player.clan?.tag &&
-      player.clan.tag.toUpperCase() === ctx.cfg.CLASH_CLAN_TAG.toUpperCase()
-    ) {
-      clanRole = player.clan.role as ClashClanMemberRole | undefined;
+    if (pending.clanTag && pending.clanTag.toUpperCase() === ctx.cfg.CLASH_CLAN_TAG.toUpperCase()) {
+      clanRole = pending.clanRole as ClashClanMemberRole | undefined;
     }
     await enforceLinkedMemberRoles(ctx, member, clanRole);
   } catch {
@@ -1925,6 +1900,8 @@ export async function handleProfileInteraction(ctx: AppContext, interaction: But
     await interaction.deferUpdate().catch(() => undefined);
 
     ctx.db.prepare('DELETE FROM user_links WHERE discord_user_id = ?').run(userId);
+    clearPendingTag(ctx, userId);
+    dbDeleteJobState(ctx.db, invalidTagMessageKey(userId));
     dbDeleteJobState(ctx.db, `profile:uiMessage:${userId}`);
     dbDeleteJobState(ctx.db, nicknameMenuStateKey(userId));
 
