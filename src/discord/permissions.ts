@@ -18,6 +18,9 @@ export async function enforceChannelPermissions(ctx: AppContext, client: Client,
     .fetch(ctx.cfg.CHANNEL_ANNOUNCEMENTS_ID)
     .catch(() => null);
   const nonMember = await guild.channels.fetch(ctx.cfg.CHANNEL_NON_MEMBER_ID).catch(() => null);
+  const generalVoice = ctx.cfg.CHANNEL_GENERAL_VOICE_ID
+    ? await guild.channels.fetch(ctx.cfg.CHANNEL_GENERAL_VOICE_ID).catch(() => null)
+    : null;
 
   const problems: string[] = [];
 
@@ -52,16 +55,19 @@ export async function enforceChannelPermissions(ctx: AppContext, client: Client,
     );
   if (!nonMember)
     problems.push(`Non-member channel id not found in guild: ${ctx.cfg.CHANNEL_NON_MEMBER_ID}`);
+  if (ctx.cfg.CHANNEL_GENERAL_VOICE_ID && !generalVoice)
+    problems.push(
+      `General voice channel id not found in guild: ${ctx.cfg.CHANNEL_GENERAL_VOICE_ID}`,
+    );
 
-  // Verification (who-are-you): keep channel visible so private threads don't "vanish",
-  // but prevent posting in the channel itself.
+  // Verification (who-are-you): everyone can see it, but only the bot posts; onboarding happens in threads.
   if (verification && verification.type === ChannelType.GuildText) {
     if (!canView(verification)) problems.push('Verification: bot cannot view channel');
     if (!canManageOverwrites(verification))
       problems.push('Verification: bot lacks Manage Channels permission');
 
     if (canManageOverwrites(verification)) {
-      // Ensure unlinked users can access the verification channel + threads.
+      // Allow everyone to see the instructions while keeping the channel read-only.
       await safeEdit('Verification', verification, everyoneRoleId, {
         ViewChannel: true,
         ReadMessageHistory: true,
@@ -71,7 +77,6 @@ export async function enforceChannelPermissions(ctx: AppContext, client: Client,
         SendMessagesInThreads: true,
       });
 
-      // Allow clan roles + vanquished to view (needed to access private threads).
       for (const roleId of [
         ctx.cfg.ROLE_NON_MEMBER_ID,
         ctx.cfg.ROLE_MEMBER_ID,
@@ -141,6 +146,47 @@ export async function enforceChannelPermissions(ctx: AppContext, client: Client,
     }
   }
 
+  // Optional general voice: hide from unverified, allow clan roles to connect.
+  if (generalVoice && generalVoice.type === ChannelType.GuildVoice) {
+    if (!canView(generalVoice)) problems.push('General voice: bot cannot view channel');
+    if (!canManageOverwrites(generalVoice))
+      problems.push('General voice: bot lacks Manage Channels permission');
+
+    if (canManageOverwrites(generalVoice)) {
+      await safeEdit('General voice', generalVoice, everyoneRoleId, {
+        ViewChannel: false,
+        Connect: false,
+      });
+
+      await safeEdit('General voice', generalVoice, ctx.cfg.ROLE_NON_MEMBER_ID, {
+        ViewChannel: false,
+        Connect: false,
+      });
+
+      for (const roleId of [
+        ctx.cfg.ROLE_MEMBER_ID,
+        ctx.cfg.ROLE_ELDER_ID,
+        ctx.cfg.ROLE_COLEADER_ID,
+        ctx.cfg.ROLE_LEADER_ID,
+      ]) {
+        await safeEdit('General voice', generalVoice, roleId, {
+          ViewChannel: true,
+          Connect: true,
+          Speak: true,
+          Stream: true,
+          UseEmbeddedActivities: true,
+        });
+      }
+
+      await safeEdit('General voice', generalVoice, meUser.id, {
+        ViewChannel: true,
+        Connect: true,
+        Speak: true,
+        Stream: true,
+      });
+    }
+  }
+
   // War logs: elder/co-leader read-only, leader full.
   if (warLogs && warLogs.type === ChannelType.GuildText) {
     if (!canView(warLogs)) problems.push('War logs: bot cannot view channel');
@@ -196,11 +242,24 @@ export async function enforceChannelPermissions(ctx: AppContext, client: Client,
       problems.push('Announcements: bot lacks Manage Channels permission');
 
     if (canManageOverwrites(announcements)) {
-      // Ensure unlinked users can view announcements.
       await safeEdit('Announcements', announcements, everyoneRoleId, {
-        ViewChannel: true,
-        ReadMessageHistory: true,
+        ViewChannel: false,
+        ReadMessageHistory: false,
       });
+
+      for (const roleId of [
+        ctx.cfg.ROLE_NON_MEMBER_ID,
+        ctx.cfg.ROLE_MEMBER_ID,
+        ctx.cfg.ROLE_ELDER_ID,
+        ctx.cfg.ROLE_COLEADER_ID,
+        ctx.cfg.ROLE_LEADER_ID,
+      ]) {
+        await safeEdit('Announcements', announcements, roleId, {
+          ViewChannel: true,
+          ReadMessageHistory: true,
+          SendMessages: false,
+        });
+      }
 
       await safeEdit('Announcements', announcements, meUser.id, {
         ViewChannel: true,
@@ -218,12 +277,11 @@ export async function enforceChannelPermissions(ctx: AppContext, client: Client,
       problems.push('Non-member: bot lacks Manage Channels permission');
 
     if (canManageOverwrites(nonMember)) {
-      // Allow unlinked users (no roles) to see the non-member area.
       await safeEdit('Non-member', nonMember, everyoneRoleId, {
-        ViewChannel: true,
-        ReadMessageHistory: true,
-        SendMessages: true,
-        UseApplicationCommands: true,
+        ViewChannel: false,
+        ReadMessageHistory: false,
+        SendMessages: false,
+        UseApplicationCommands: false,
       });
 
       // Keep all clan roles out (member/elder/co-leader/leader).

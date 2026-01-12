@@ -109,7 +109,7 @@ export async function syncRolesOnce(ctx: AppContext, guild: Guild) {
 
 export async function enforceUnlinkedMemberVanquished(ctx: AppContext, member: GuildMember) {
   if (member.user.bot) return;
-  await applyMemberRoles(ctx, member, undefined);
+  await applyMemberRoles(ctx, member, undefined, { assignVanquishedOnMissingClan: false });
 }
 
 export async function enforceLinkedMemberRoles(
@@ -125,12 +125,14 @@ async function applyMemberRoles(
   ctx: AppContext,
   member: GuildMember,
   clanRole?: ClashClanMemberRole,
+  opts?: { assignVanquishedOnMissingClan?: boolean },
 ) {
   const clanRoleIds = allClanRoleIds(ctx);
 
   const desiredClanRoleId = clanRole ? roleIdForClanRole(ctx, clanRole) : null;
   const hasVanquished = member.roles.cache.has(ctx.cfg.ROLE_NON_MEMBER_ID);
-  const shouldBeVanquished = !clanRole;
+  const assignVanquished = opts?.assignVanquishedOnMissingClan ?? true;
+  const shouldBeVanquished = assignVanquished && !clanRole;
 
   // Remove any clan roles that aren't the desired one.
   const toRemove: string[] = [];

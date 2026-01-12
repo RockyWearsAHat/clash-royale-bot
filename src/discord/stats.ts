@@ -293,7 +293,7 @@ async function resolveTargetTag(
   return {
     errorEmbed: infoEmbed(
       'No match',
-      `No clan member matched **${query}**, and it doesn't look like a valid player tag. Try a more specific name, or paste a tag (e.g. #ABC123).`,
+      `No clan member matched **${query}**, and it doesn't look like a valid player tag. Try a more specific name, or paste a tag (e.g. ABC123 or #ABC123).`,
     ),
   };
 }
@@ -305,7 +305,7 @@ export const StatsCommand: SlashCommand = {
     .addStringOption((o) =>
       o
         .setName('player')
-        .setDescription('Clan member name (or a player tag like #ABC123)')
+        .setDescription('Clan member name (or a player tag like ABC123 or #ABC123)')
         .setRequired(false),
     ),
 

@@ -51,7 +51,8 @@ async function deleteMessageIfExists(thread: ThreadChannel, messageId?: string |
 
 function normalizeTag(raw: string): string {
   const m = raw.toUpperCase().match(TAG_RE);
-  if (!m) throw new Error('Please provide a valid Clash Royale player tag (looks like #ABC123).');
+  if (!m)
+    throw new Error('Please provide a valid Clash Royale player tag (example: ABC123 or #ABC123).');
   const tag = m[0].startsWith('#') ? m[0] : `#${m[0]}`;
   return tag;
 }
@@ -485,7 +486,7 @@ async function renderOrUpdateProfileMessage(
   const embed = new EmbedBuilder().setTitle('Profile');
   if (!row) {
     embed.setDescription(
-      'Step 1: Paste your Clash Royale player tag in this thread (example: `#ABC123`).',
+      'Step 1: Paste your Clash Royale player tag in this thread (example: `ABC123`, the # is optional).',
     );
   } else {
     embed.setDescription(`Linked to ${row.player_tag}. Choose an option below.`);
@@ -1197,7 +1198,7 @@ export async function handleVerificationEntryMessage(ctx: AppContext, msg: any) 
 
   const hint = await msg.channel
     .send({
-      content: `<@${msg.author.id}> your verification thread is here: <#${thread.id}> (paste your tag like \`#ABC123\`).`,
+      content: `<@${msg.author.id}> your verification thread is here: <#${thread.id}> (paste your tag like \`ABC123\`; the # is optional).`,
     })
     .catch(() => null);
   if (hint) {
@@ -1238,7 +1239,23 @@ export async function handleVerificationThreadMessage(ctx: AppContext, msg: any)
   }
 
   // Validate tag via Clash API
-  const player = await ctx.clash.getPlayer(tag);
+  let player;
+  try {
+    player = await ctx.clash.getPlayer(tag);
+  } catch (err) {
+    await msg.delete().catch(() => undefined);
+    const reason = err instanceof Error ? err.message : 'Unknown error';
+    const reply = await thread
+      .send({
+        content: `<@${msg.author.id}> I couldn’t find that tag. Double-check the characters (0 vs O, 2 vs Z) and try again. (${reason})`,
+        allowedMentions: { users: [msg.author.id] },
+      })
+      .catch(() => null);
+    if (reply) {
+      setTimeout(() => reply.delete().catch(() => undefined), 20_000);
+    }
+    return;
+  }
 
   // Save mapping
   ctx.db.transaction(() => {
@@ -1545,7 +1562,7 @@ export async function handleProfileInteraction(ctx: AppContext, interaction: But
     dbDeleteJobState(ctx.db, `profile:uiMessage:${userId}`);
     dbDeleteJobState(ctx.db, nicknameMenuStateKey(userId));
 
-    // Best-effort: remove bot-managed roles and restore verification channel access.
+    // Best-effort: remove bot-managed roles and nudge them back into verification.
     try {
       const member = await guild.members.fetch(userId);
 
@@ -1558,15 +1575,12 @@ export async function handleProfileInteraction(ctx: AppContext, interaction: But
       const toRemove = clanRoleIds.filter((rid) => member.roles.cache.has(rid));
       if (toRemove.length) await member.roles.remove(toRemove).catch(() => undefined);
 
-      // Unlinked users should always be vanquished.
-      if (!member.roles.cache.has(ctx.cfg.ROLE_NON_MEMBER_ID)) {
-        await member.roles.add(ctx.cfg.ROLE_NON_MEMBER_ID).catch(() => undefined);
+      // Remove bot-managed roles so the user falls back to locked-down onboarding access.
+      if (member.roles.cache.has(ctx.cfg.ROLE_NON_MEMBER_ID)) {
+        await member.roles.remove(ctx.cfg.ROLE_NON_MEMBER_ID).catch(() => undefined);
       }
 
-      const chan = await guild.channels.fetch(ctx.cfg.CHANNEL_VERIFICATION_ID).catch(() => null);
-      if (chan && chan.type === ChannelType.GuildText) {
-        await chan.permissionOverwrites.delete(userId).catch(() => undefined);
-      }
+      // Thread visibility is handled automatically when the user posts again.
     } catch {
       // ignore
     }

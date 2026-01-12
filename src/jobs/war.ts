@@ -351,6 +351,29 @@ function clampWarDayIndex(n: number | undefined): number | undefined {
   return i;
 }
 
+function inferDayIndexFromPeriodLogs(payload: any): number | undefined {
+  const logs = Array.isArray(payload?.periodLogs) ? payload.periodLogs : [];
+  if (!logs.length) return undefined;
+
+  const indices = logs
+    .map((entry) => toFiniteInt((entry as any)?.periodIndex))
+    .filter((idx): idx is number => typeof idx === 'number' && Number.isFinite(idx));
+  if (!indices.length) return undefined;
+
+  const uniqueSorted = Array.from(new Set(indices)).sort((a, b) => a - b);
+  const currentIndex = toFiniteInt(payload?.periodIndex);
+
+  if (currentIndex !== undefined) {
+    const priorCount = uniqueSorted.filter((idx) => idx < currentIndex).length;
+    const inferred = priorCount + 1;
+    const clamped = clampWarDayIndex(inferred);
+    if (clamped !== undefined) return clamped;
+  }
+
+  const clamped = clampWarDayIndex(uniqueSorted.length);
+  return clamped;
+}
+
 function inferWarDayIndex(
   payload: any,
   participants: Map<string, ParticipantSnapshot>,
@@ -370,21 +393,29 @@ function inferWarDayIndex(
   if (direct !== undefined) return clampWarDayIndex(direct);
 
   const sectionIndex = toFiniteInt(payload?.sectionIndex);
+  let sectionCandidate: number | undefined;
   if (sectionIndex !== undefined) {
-    if (sectionIndex >= 1 && sectionIndex <= 5) return clampWarDayIndex(sectionIndex);
-
-    if (isWarBattlePeriod && sectionIndex >= 0 && sectionIndex <= 4) {
-      const mapped = clampWarDayIndex(sectionIndex + 1);
-      if (mapped !== undefined) return mapped;
+    if (sectionIndex >= 1 && sectionIndex <= 5) {
+      sectionCandidate = clampWarDayIndex(sectionIndex);
+    } else if (isWarBattlePeriod && sectionIndex >= 0 && sectionIndex <= 4) {
+      sectionCandidate = clampWarDayIndex(sectionIndex + 1);
     }
   }
 
   const periodIndex = toFiniteInt(payload?.periodIndex);
+  let periodCandidate: number | undefined;
   if (periodIndex !== undefined && isWarBattlePeriod) {
     const rem = periodIndex % 5;
-    const mapped = clampWarDayIndex(rem + 1);
-    if (mapped !== undefined) return mapped;
+    periodCandidate = clampWarDayIndex(rem + 1);
   }
+
+  if (isWarBattlePeriod) {
+    const inferredFromLogs = inferDayIndexFromPeriodLogs(payload);
+    if (inferredFromLogs !== undefined) return inferredFromLogs;
+  }
+
+  if (periodCandidate !== undefined) return periodCandidate;
+  if (sectionCandidate !== undefined) return sectionCandidate;
 
   if (isColosseum) {
     // Fall back to cumulative deck totals when indices are unavailable.

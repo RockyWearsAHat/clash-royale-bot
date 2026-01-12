@@ -17,7 +17,7 @@ export const WhoAmICommand: SlashCommand = {
         embeds: [
           infoEmbed(
             'Not linked yet',
-            'The bot will create a verification thread for you automatically. Open your thread and paste your player tag (example: `#ABC123`).',
+            'The bot will create a verification thread for you automatically. Open your thread and paste your player tag (example: `ABC123`, the # is optional).',
           ),
         ],
         ephemeral: true,

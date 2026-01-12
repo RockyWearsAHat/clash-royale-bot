@@ -67,7 +67,7 @@ client.on('guildMemberAdd', async (member) => {
       .get(member.id) as { 1: number } | undefined;
     if (linked) return;
 
-    // Unlinked users should immediately be vanquished.
+    // Unlinked users should immediately be isolated to verification threads only.
     await enforceUnlinkedMemberVanquished(ctx, member);
 
     await ensureVerificationThreadForUser(ctx, client, member.id);
@@ -188,7 +188,7 @@ client.once('ready', async () => {
         // ignore
       }
 
-      // Ensure unlinked users get vanquished + a verification thread.
+      // Ensure unlinked users stay isolated and have a verification thread.
       // Uses REST pagination (avoids gateway opcode 8) and checkpoints progress.
       const scanDoneKey = 'startup:unlinked_scan:done';
       const scanAfterKey = 'startup:unlinked_scan:after';

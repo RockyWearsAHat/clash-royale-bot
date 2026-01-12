@@ -26,6 +26,7 @@ const EnvSchema = z
     CHANNEL_VERIFICATION_ID: z.string().min(1),
     CHANNEL_WAR_LOGS_ID: z.string().min(1),
     CHANNEL_ANNOUNCEMENTS_ID: z.string().min(1),
+    CHANNEL_GENERAL_VOICE_ID: z.string().min(1).optional(),
 
     // Preferred (clearer naming)
     CHANNEL_NON_MEMBER_ID: z.string().min(1).optional(),
