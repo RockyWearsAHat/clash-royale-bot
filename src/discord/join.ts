@@ -17,7 +17,7 @@ import {
 } from 'discord.js';
 import type { SlashCommand } from './commands.js';
 import type { AppContext } from '../types.js';
-import { dbDeleteJobState, dbGetJobState, dbSetJobState } from '../db.js';
+import { dbAudit, dbDeleteJobState, dbGetJobState, dbSetJobState } from '../db.js';
 import type { ClashClanMemberRole, ClashPlayer } from '../clashApi.js';
 import { enforceLinkedMemberRoles, enforceUnlinkedMemberRoleReset } from './roleSync.js';
 
@@ -1364,6 +1364,13 @@ export async function handleVerificationThreadMessage(ctx: AppContext, msg: any)
     return;
   }
 
+  // Timing metrics for paste → loading message → Clash API → confirm card.
+  const tStart = Date.now();
+  let loadingMs = 0;
+  let clashMs = 0;
+  let confirmMs = 0;
+  let outcome: 'ok' | 'clash_error' = 'ok';
+
   // Clear any prior pending/"validating" message for this user.
   const priorPendingMsgId = dbGetJobState(ctx.db, pendingTagMessageKey(msg.author.id));
   if (priorPendingMsgId) {
@@ -1372,12 +1379,14 @@ export async function handleVerificationThreadMessage(ctx: AppContext, msg: any)
 
   // Show a lightweight loading state so users know their tag is being
   // checked before we hit the Clash API.
+  const tLoadingStart = Date.now();
   const loading = await thread
     .send({
       content: `<@${msg.author.id}> Validating your Clash Royale tag… (this may take a few seconds)`,
       allowedMentions: { users: [msg.author.id] },
     })
     .catch(() => null);
+  loadingMs = Date.now() - tLoadingStart;
   if (loading) {
     dbSetJobState(ctx.db, pendingTagMessageKey(msg.author.id), loading.id);
   }
@@ -1385,7 +1394,9 @@ export async function handleVerificationThreadMessage(ctx: AppContext, msg: any)
   // Validate tag via Clash API
   let player;
   try {
+    const tClashStart = Date.now();
     player = await ctx.clash.getPlayer(tag);
+    clashMs = Date.now() - tClashStart;
   } catch (err) {
     await msg.delete().catch(() => undefined);
 
@@ -1415,6 +1426,18 @@ export async function handleVerificationThreadMessage(ctx: AppContext, msg: any)
           .finally(() => dbDeleteJobState(ctx.db, invalidTagMessageKey(msg.author.id)));
       }, 20_000);
     }
+    outcome = 'clash_error';
+    dbAudit(
+      ctx.db,
+      'verify_paste_timing',
+      JSON.stringify({
+        userId: msg.author.id,
+        loadingMs,
+        clashMs,
+        confirmMs: 0,
+        outcome,
+      }),
+    );
     return;
   }
 
@@ -1476,6 +1499,19 @@ export async function handleVerificationThreadMessage(ctx: AppContext, msg: any)
   } else {
     scheduleThreadCleanupKeep(thread, [uiId]);
   }
+
+  confirmMs = Date.now() - (tStart + loadingMs + clashMs);
+  dbAudit(
+    ctx.db,
+    'verify_paste_timing',
+    JSON.stringify({
+      userId: msg.author.id,
+      loadingMs,
+      clashMs,
+      confirmMs,
+      outcome,
+    }),
+  );
 }
 
 export async function handleVerifyTagButton(ctx: AppContext, interaction: ButtonInteraction) {
@@ -1553,11 +1589,21 @@ export async function handleVerifyTagButton(ctx: AppContext, interaction: Button
   // do not re-call the Clash API here.
   await interaction.deferUpdate().catch(() => undefined);
 
+  // Timing metrics for confirm → link DB row → thread UI → reply.
+  const tStart = Date.now();
+  let linkMs = 0;
+  let uiMs = 0;
+  let replyMs = 0;
+  let outcome: 'ok' | 'tag_taken' = 'ok';
+
+  const tLinkStart = Date.now();
   const linkResult = linkUserToPlayer(ctx, userId, {
     tag: pending.tag,
     name: pending.playerName,
   } as ClashPlayer);
+  linkMs = Date.now() - tLinkStart;
   if (!linkResult.ok) {
+    outcome = 'tag_taken';
     clearPendingTag(ctx, userId);
     dbDeleteJobState(ctx.db, invalidTagMessageKey(userId));
     await interaction
@@ -1572,6 +1618,18 @@ export async function handleVerifyTagButton(ctx: AppContext, interaction: Button
     if (uiId) keepIds.add(uiId);
     scheduleThreadCleanupKeep(channel as ThreadChannel, [...keepIds]);
     setTimeout(() => interaction.message?.delete().catch(() => undefined), 12_000);
+
+    dbAudit(
+      ctx.db,
+      'verify_confirm_timing',
+      JSON.stringify({
+        userId,
+        linkMs,
+        uiMs: 0,
+        replyMs: 0,
+        outcome,
+      }),
+    );
     return;
   }
 
@@ -1606,6 +1664,9 @@ export async function handleVerifyTagButton(ctx: AppContext, interaction: Button
     }
   }
 
+  uiMs = Date.now() - (tStart + linkMs);
+
+  const tReplyStart = Date.now();
   await interaction
     .editReply({
       content: `Linked to **${pending.playerName} (${pending.tag})**. Roles will update shortly.`,
@@ -1613,6 +1674,7 @@ export async function handleVerifyTagButton(ctx: AppContext, interaction: Button
       components: [],
     })
     .catch(() => undefined);
+  replyMs = Date.now() - tReplyStart;
 
   // Immediately sync Discord roles so this member's access reflects the
   // new linked state, but do it off the critical UI path to keep the
@@ -1633,6 +1695,18 @@ export async function handleVerifyTagButton(ctx: AppContext, interaction: Button
       // ignore; cron-based sync will catch up shortly
     }
   })();
+
+  dbAudit(
+    ctx.db,
+    'verify_confirm_timing',
+    JSON.stringify({
+      userId,
+      linkMs,
+      uiMs,
+      replyMs,
+      outcome,
+    }),
+  );
 
   setTimeout(() => interaction.message?.delete().catch(() => undefined), 12_000);
 }
@@ -1901,11 +1975,19 @@ export async function handleProfileInteraction(ctx: AppContext, interaction: But
   if (action === 'unlink_confirm') {
     await interaction.deferUpdate().catch(() => undefined);
 
+    // Timing metrics for unlink → DB delete → thread UI → reply.
+    const tStart = Date.now();
+    let dbMs = 0;
+    let uiMs = 0;
+    let replyMs = 0;
+
+    const tDbStart = Date.now();
     ctx.db.prepare('DELETE FROM user_links WHERE discord_user_id = ?').run(userId);
     clearPendingTag(ctx, userId);
     dbDeleteJobState(ctx.db, invalidTagMessageKey(userId));
     dbDeleteJobState(ctx.db, `profile:uiMessage:${userId}`);
     dbDeleteJobState(ctx.db, nicknameMenuStateKey(userId));
+    dbMs = Date.now() - tDbStart;
 
     // Refresh the profile thread UI in-place first so the user sees the
     // unlinked state immediately, then fix roles in the background.
@@ -1934,6 +2016,8 @@ export async function handleProfileInteraction(ctx: AppContext, interaction: But
       await refreshProfileThreadForUser(ctx, interaction.client, userId);
     }
 
+    uiMs = Date.now() - (tStart + dbMs);
+
     // Best-effort: strip every removable role, but do it just after
     // we update the thread UI so the unlink confirmation feels fast.
     void (async () => {
@@ -1949,6 +2033,7 @@ export async function handleProfileInteraction(ctx: AppContext, interaction: But
     // interaction reply API (works for ephemeral), and fall back to
     // editing/deleting the underlying message if needed.
     try {
+      const tReplyStart = Date.now();
       await interaction
         .editReply({
           content:
@@ -1957,10 +2042,12 @@ export async function handleProfileInteraction(ctx: AppContext, interaction: But
           components: [],
         })
         .catch(() => undefined);
+      replyMs = Date.now() - tReplyStart;
       setTimeout(() => interaction.deleteReply().catch(() => undefined), 8_000);
     } catch {
       const targetMessage = interaction.message as any;
       if (targetMessage) {
+        const tReplyStart = Date.now();
         await targetMessage
           .edit({
             content:
@@ -1969,9 +2056,12 @@ export async function handleProfileInteraction(ctx: AppContext, interaction: But
             components: [],
           })
           .catch(() => undefined);
+        replyMs = Date.now() - tReplyStart;
         setTimeout(() => targetMessage.delete().catch(() => undefined), 8_000);
       }
     }
+
+    dbAudit(ctx.db, 'verify_unlink_timing', JSON.stringify({ userId, dbMs, uiMs, replyMs }));
   }
 }
 
