@@ -18,6 +18,7 @@ import {
 import type { SlashCommand } from './commands.js';
 import type { AppContext } from '../types.js';
 import { dbDeleteJobState, dbGetJobState, dbSetJobState } from '../db.js';
+import type { ClashPlayer } from '../clashApi.js';
 
 const TAG_RE = /#?[0289PYLQGRJCUV]{5,}/i;
 type DisplayPreference = 'discord' | 'discord_with_clash' | 'clash' | 'custom';
@@ -67,6 +68,78 @@ type LinkRow = {
   custom_display_name?: string;
   display_preference: DisplayPreference;
 };
+
+type PendingTagState = {
+  tag: string;
+  playerName: string;
+  clanName?: string;
+  clanTag?: string;
+  clanRole?: string;
+};
+
+const pendingTagKey = (userId: string) => `verify:pendingTag:${userId}`;
+const pendingTagMessageKey = (userId: string) => `verify:pendingTagMessage:${userId}`;
+
+function storePendingTag(ctx: AppContext, userId: string, state: PendingTagState) {
+  dbSetJobState(ctx.db, pendingTagKey(userId), JSON.stringify(state));
+}
+
+function readPendingTag(ctx: AppContext, userId: string): PendingTagState | undefined {
+  const raw = dbGetJobState(ctx.db, pendingTagKey(userId));
+  if (!raw) return undefined;
+  try {
+    const parsed = JSON.parse(raw) as PendingTagState;
+    if (!parsed?.tag || !parsed?.playerName) return undefined;
+    return parsed;
+  } catch {
+    return undefined;
+  }
+}
+
+function clearPendingTag(ctx: AppContext, userId: string) {
+  dbDeleteJobState(ctx.db, pendingTagKey(userId));
+  dbDeleteJobState(ctx.db, pendingTagMessageKey(userId));
+}
+
+function isPlayerTagConstraintError(err: unknown): boolean {
+  if (!err || typeof err !== 'object') return false;
+  const code = (err as any).code;
+  if (code !== 'SQLITE_CONSTRAINT_UNIQUE') return false;
+  const message = typeof (err as any).message === 'string' ? (err as any).message : '';
+  return message.includes('player_tag');
+}
+
+function linkUserToPlayer(
+  ctx: AppContext,
+  userId: string,
+  player: ClashPlayer,
+): { ok: true } | { ok: false; code: 'tag_taken' } {
+  const existing = ctx.db
+    .prepare('SELECT discord_user_id FROM user_links WHERE player_tag = ?')
+    .get(player.tag) as { discord_user_id: string } | undefined;
+  if (existing && existing.discord_user_id !== userId) {
+    return { ok: false, code: 'tag_taken' };
+  }
+
+  try {
+    ctx.db
+      .prepare(
+        `INSERT INTO user_links(discord_user_id, player_tag, player_name, display_preference)
+         VALUES(?, ?, ?, 'discord')
+         ON CONFLICT(discord_user_id) DO UPDATE
+           SET player_tag = excluded.player_tag,
+               player_name = excluded.player_name`,
+      )
+      .run(userId, player.tag, player.name);
+  } catch (err) {
+    if (isPlayerTagConstraintError(err)) {
+      return { ok: false, code: 'tag_taken' };
+    }
+    throw err;
+  }
+
+  return { ok: true };
+}
 
 function getLinkRow(ctx: AppContext, userId: string): LinkRow | undefined {
   return ctx.db
@@ -383,7 +456,7 @@ async function closeOtherThreadsForUser(
 
   const isBotManagedThreadName = (name: string | null | undefined) => {
     const n = String(name ?? '').toLowerCase();
-    return n.startsWith('link-') || n.startsWith('setup necessary') || n.startsWith('profile -');
+    return n.startsWith('link-') || n.startsWith('verification —') || n.startsWith('profile -');
   };
 
   for (const t of threads) {
@@ -820,7 +893,7 @@ export async function repairVerificationThreadsOnce(ctx: AppContext, client: any
 
   const isBotManagedThreadName = (name: string | null | undefined) => {
     const n = String(name ?? '').toLowerCase();
-    return n.startsWith('link-') || n.startsWith('setup necessary') || n.startsWith('profile -');
+    return n.startsWith('link-') || n.startsWith('verification —') || n.startsWith('profile -');
   };
 
   const botId = String(client.user?.id ?? '');
@@ -1244,10 +1317,9 @@ export async function handleVerificationThreadMessage(ctx: AppContext, msg: any)
     player = await ctx.clash.getPlayer(tag);
   } catch (err) {
     await msg.delete().catch(() => undefined);
-    const reason = err instanceof Error ? err.message : 'Unknown error';
     const reply = await thread
       .send({
-        content: `<@${msg.author.id}> I couldn’t find that tag. Double-check the characters (0 vs O, 2 vs Z) and try again. (${reason})`,
+        content: `<@${msg.author.id}> I couldn’t find that tag. Double-check the characters (0 vs O, 2 vs Z) and try again.`,
         allowedMentions: { users: [msg.author.id] },
       })
       .catch(() => null);
@@ -1257,41 +1329,197 @@ export async function handleVerificationThreadMessage(ctx: AppContext, msg: any)
     return;
   }
 
-  // Save mapping
-  ctx.db.transaction(() => {
-    ctx.db
-      .prepare(
-        `INSERT INTO user_links(discord_user_id, player_tag, player_name, display_preference)
-         VALUES(?, ?, ?, 'discord')
-         ON CONFLICT(discord_user_id) DO UPDATE
-           SET player_tag = excluded.player_tag,
-               player_name = excluded.player_name`,
-      )
-      .run(msg.author.id, player.tag, player.name);
-  })();
-
-  const inClan = player.clan?.tag?.toUpperCase() === ctx.cfg.CLASH_CLAN_TAG.toUpperCase();
-
   // Keep the thread clean: delete the user's tag message once processed.
   await msg.delete().catch(() => undefined);
 
-  // Turn this into a simple profile thread.
-  await thread.setName(`Profile - ${player.name}`.slice(0, 90)).catch(() => undefined);
+  const pendingState: PendingTagState = {
+    tag: player.tag,
+    playerName: player.name,
+    clanName: player.clan?.name,
+    clanTag: player.clan?.tag,
+    clanRole: player.clan?.role,
+  };
+  storePendingTag(ctx, msg.author.id, pendingState);
 
-  // Force rebuild of the static UI message so it flips from “Step 1” to “Linked”.
-  const priorUiId = dbGetJobState(ctx.db, `profile:uiMessage:${msg.author.id}`);
-  if (priorUiId) {
-    await deleteMessageIfExists(thread, priorUiId);
-    dbDeleteJobState(ctx.db, `profile:uiMessage:${msg.author.id}`);
+  const priorPendingMsgId = dbGetJobState(ctx.db, pendingTagMessageKey(msg.author.id));
+  if (priorPendingMsgId) {
+    await deleteMessageIfExists(thread, priorPendingMsgId);
   }
+
   await renderOrUpdateProfileMessage(ctx, thread, msg.author.id);
-
-  // Clean up any prior messages so the thread reads like a form.
   const uiId = dbGetJobState(ctx.db, `profile:uiMessage:${msg.author.id}`) ?? '';
-  await cleanupThreadMessagesKeep(thread, [uiId]);
 
-  // Optional: lock the parent "who-are-you" channel for the user.
-  // We keep it viewable so their private profile thread doesn't become inaccessible.
+  const embed = new EmbedBuilder()
+    .setTitle('Confirm Player')
+    .setDescription(`Link to **${player.name} (${player.tag})**?`)
+    .addFields({
+      name: 'Clan',
+      value: player.clan?.name
+        ? `${player.clan.name}${player.clan.tag ? ` (${player.clan.tag})` : ''}`
+        : 'Not currently in a clan',
+      inline: false,
+    });
+
+  const buttons = new ActionRowBuilder<ButtonBuilder>().addComponents(
+    new ButtonBuilder()
+      .setCustomId(`verifytag:${msg.author.id}:confirm`)
+      .setStyle(ButtonStyle.Primary)
+      .setLabel('Confirm'),
+    new ButtonBuilder()
+      .setCustomId(`verifytag:${msg.author.id}:cancel`)
+      .setStyle(ButtonStyle.Secondary)
+      .setLabel('Cancel'),
+  );
+
+  const confirmation = await thread
+    .send({
+      content: `<@${msg.author.id}> confirm this is your Clash Royale account.`,
+      embeds: [embed],
+      components: [buttons],
+      allowedMentions: { users: [msg.author.id] },
+    })
+    .catch(() => null);
+
+  if (confirmation) {
+    dbSetJobState(ctx.db, pendingTagMessageKey(msg.author.id), confirmation.id);
+    await cleanupThreadMessagesKeep(thread, [uiId, confirmation.id]);
+  } else {
+    await cleanupThreadMessagesKeep(thread, [uiId]);
+  }
+}
+
+export async function handleVerifyTagButton(ctx: AppContext, interaction: ButtonInteraction) {
+  if (!interaction.customId.startsWith('verifytag:')) return;
+
+  const [, userId, action] = interaction.customId.split(':');
+  if (!userId || !action) return;
+
+  if (interaction.user.id !== userId) {
+    await interaction.reply({ content: 'This confirmation is not for you.', ephemeral: true });
+    return;
+  }
+
+  const channel = interaction.channel;
+  if (!channel || !channel.isThread?.()) {
+    await interaction.reply({
+      content: 'This only works inside your verification thread.',
+      ephemeral: true,
+    });
+    return;
+  }
+
+  if (channel.parentId !== ctx.cfg.CHANNEL_VERIFICATION_ID) {
+    await interaction.reply({
+      content: 'This only works inside your verification thread.',
+      ephemeral: true,
+    });
+    return;
+  }
+
+  const pending = readPendingTag(ctx, userId);
+  if (!pending) {
+    try {
+      await interaction.update({
+        content: 'No pending tag found. Paste your Clash Royale tag again to restart verification.',
+        embeds: [],
+        components: [],
+      });
+    } catch {
+      await interaction.reply({
+        content: 'No pending tag found. Paste your Clash Royale tag again to restart verification.',
+        ephemeral: true,
+      });
+    }
+    setTimeout(() => interaction.message?.delete().catch(() => undefined), 5_000);
+    return;
+  }
+
+  const keepIds = new Set<string>([interaction.message.id]);
+
+  if (action === 'cancel') {
+    clearPendingTag(ctx, userId);
+    await interaction
+      .update({
+        content: 'Canceled. Paste your Clash Royale tag again when you are ready.',
+        embeds: [],
+        components: [],
+      })
+      .catch(() => undefined);
+    const uiId = dbGetJobState(ctx.db, `profile:uiMessage:${userId}`);
+    if (uiId) keepIds.add(uiId);
+    await cleanupThreadMessagesKeep(channel as ThreadChannel, [...keepIds]);
+    setTimeout(() => interaction.message?.delete().catch(() => undefined), 5_000);
+    return;
+  }
+
+  if (action !== 'confirm') {
+    await interaction.reply({ content: 'Unknown action.', ephemeral: true });
+    return;
+  }
+
+  let player: ClashPlayer;
+  try {
+    player = await ctx.clash.getPlayer(pending.tag);
+  } catch {
+    clearPendingTag(ctx, userId);
+    await interaction
+      .update({
+        content: 'The Clash Royale API could not confirm that tag. Paste your tag again to retry.',
+        embeds: [],
+        components: [],
+      })
+      .catch(() => undefined);
+    const uiId = dbGetJobState(ctx.db, `profile:uiMessage:${userId}`);
+    if (uiId) keepIds.add(uiId);
+    await cleanupThreadMessagesKeep(channel as ThreadChannel, [...keepIds]);
+    setTimeout(() => interaction.message?.delete().catch(() => undefined), 8_000);
+    return;
+  }
+
+  const linkResult = linkUserToPlayer(ctx, userId, player);
+  if (!linkResult.ok) {
+    clearPendingTag(ctx, userId);
+    await interaction
+      .update({
+        content:
+          'That Clash Royale tag is already linked to another Discord member. Contact a leader if this is unexpected.',
+        embeds: [],
+        components: [],
+      })
+      .catch(() => undefined);
+    const uiId = dbGetJobState(ctx.db, `profile:uiMessage:${userId}`);
+    if (uiId) keepIds.add(uiId);
+    await cleanupThreadMessagesKeep(channel as ThreadChannel, [...keepIds]);
+    setTimeout(() => interaction.message?.delete().catch(() => undefined), 12_000);
+    return;
+  }
+
+  clearPendingTag(ctx, userId);
+
+  await (channel as ThreadChannel)
+    .setName(`Profile - ${player.name}`.slice(0, 90))
+    .catch(() => undefined);
+
+  const priorUiId = dbGetJobState(ctx.db, `profile:uiMessage:${userId}`);
+  if (priorUiId) {
+    await deleteMessageIfExists(channel as ThreadChannel, priorUiId);
+    dbDeleteJobState(ctx.db, `profile:uiMessage:${userId}`);
+  }
+  await renderOrUpdateProfileMessage(ctx, channel as ThreadChannel, userId);
+  const uiId = dbGetJobState(ctx.db, `profile:uiMessage:${userId}`);
+  if (uiId) keepIds.add(uiId);
+
+  await interaction
+    .update({
+      content: `Linked to **${player.name} (${player.tag})**. Roles will update shortly.`,
+      embeds: [],
+      components: [],
+    })
+    .catch(() => undefined);
+
+  await cleanupThreadMessagesKeep(channel as ThreadChannel, [...keepIds]);
+
+  setTimeout(() => interaction.message?.delete().catch(() => undefined), 12_000);
 }
 
 export async function handleLinkPreferenceInteraction(
@@ -1585,9 +1813,9 @@ export async function handleProfileInteraction(ctx: AppContext, interaction: But
       // ignore
     }
 
-    // Rename thread back to setup flow and refresh.
+    // Rename thread back to the verification flow and refresh.
     if (interaction.channel && interaction.channel.isThread?.()) {
-      const setupName = `Setup Necessary - ${interaction.user.username}`.slice(0, 90);
+      const setupName = `Verification — ${interaction.user.username}`.slice(0, 90);
       await (interaction.channel as ThreadChannel).setName(setupName).catch(() => undefined);
 
       // Force rebuild of the static thread message so it flips back to “Step 1”.

@@ -12,6 +12,7 @@ import {
   handleProfileInteraction,
   handleVerificationEntryMessage,
   handleVerificationThreadMessage,
+  handleVerifyTagButton,
   ensureVerificationThreadForUser,
   recreateProfileThreadForUser,
   refreshProfileThreadMainMenuMessage,
@@ -110,6 +111,10 @@ client.on('messageCreate', async (msg) => {
 client.on('interactionCreate', async (interaction) => {
   try {
     if (interaction.isButton()) {
+      if (interaction.customId.startsWith('verifytag:')) {
+        await handleVerifyTagButton(ctx, interaction);
+        return;
+      }
       await handleLinkPreferenceInteraction(ctx, interaction);
       await handleProfileInteraction(ctx, interaction);
       await handleStatsPublishButton(ctx, interaction);
