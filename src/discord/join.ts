@@ -1526,6 +1526,16 @@ export async function handleVerifyTagButton(ctx: AppContext, interaction: Button
   // Discord doesn't treat the interaction as timed out.
   await interaction.deferUpdate().catch(() => undefined);
 
+  // Show a quick in-thread loading state so users know the bot is
+  // talking to the Clash Royale API and don't paste their tag again.
+  await interaction
+    .editReply({
+      content: 'Validating your Clash Royale tag with the Clash API. This can take a few seconds…',
+      embeds: [],
+      components: [],
+    })
+    .catch(() => undefined);
+
   let player: ClashPlayer;
   try {
     player = await ctx.clash.getPlayer(pending.tag);
