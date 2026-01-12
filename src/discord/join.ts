@@ -1585,9 +1585,7 @@ export async function handleVerifyTagButton(ctx: AppContext, interaction: Button
   if (channel.isThread?.() && channel.parentId === ctx.cfg.CHANNEL_VERIFICATION_ID) {
     const thread = channel as ThreadChannel;
     try {
-      await thread
-        .setName(`Profile - ${pending.playerName}`.slice(0, 90))
-        .catch(() => undefined);
+      await thread.setName(`Profile - ${pending.playerName}`.slice(0, 90)).catch(() => undefined);
     } catch {
       // ignore rename errors
     }
