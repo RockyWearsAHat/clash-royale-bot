@@ -1614,21 +1614,25 @@ export async function handleVerifyTagButton(ctx: AppContext, interaction: Button
     })
     .catch(() => undefined);
 
-  // Immediately sync Discord roles so users see the correct access without waiting for cron.
   // Immediately sync Discord roles so this member's access reflects the
-  // new linked state without waiting for cron, using the clan snapshot
-  // we captured when the tag was first pasted.
-  try {
-    const guild = await interaction.client.guilds.fetch(ctx.cfg.GUILD_ID);
-    const member = await guild.members.fetch(userId);
-    let clanRole: ClashClanMemberRole | undefined;
-    if (pending.clanTag && pending.clanTag.toUpperCase() === ctx.cfg.CLASH_CLAN_TAG.toUpperCase()) {
-      clanRole = pending.clanRole as ClashClanMemberRole | undefined;
+  // new linked state, but do it off the critical UI path to keep the
+  // Confirm interaction snappy.
+  void (async () => {
+    try {
+      const guild = await interaction.client.guilds.fetch(ctx.cfg.GUILD_ID);
+      const member = await guild.members.fetch(userId);
+      let clanRole: ClashClanMemberRole | undefined;
+      if (
+        pending.clanTag &&
+        pending.clanTag.toUpperCase() === ctx.cfg.CLASH_CLAN_TAG.toUpperCase()
+      ) {
+        clanRole = pending.clanRole as ClashClanMemberRole | undefined;
+      }
+      await enforceLinkedMemberRoles(ctx, member, clanRole);
+    } catch {
+      // ignore; cron-based sync will catch up shortly
     }
-    await enforceLinkedMemberRoles(ctx, member, clanRole);
-  } catch {
-    // ignore; cron-based sync will catch up shortly
-  }
+  })();
 
   setTimeout(() => interaction.message?.delete().catch(() => undefined), 12_000);
 }
@@ -1930,14 +1934,16 @@ export async function handleProfileInteraction(ctx: AppContext, interaction: But
       await refreshProfileThreadForUser(ctx, interaction.client, userId);
     }
 
-    // Best-effort: strip every removable role for this member immediately
-    // so permissions match the new unlinked state without waiting on cron.
-    try {
-      const member = await guild.members.fetch(userId);
-      await enforceUnlinkedMemberRoleReset(ctx, member);
-    } catch {
-      // ignore
-    }
+    // Best-effort: strip every removable role, but do it just after
+    // we update the thread UI so the unlink confirmation feels fast.
+    void (async () => {
+      try {
+        const member = await guild.members.fetch(userId);
+        await enforceUnlinkedMemberRoleReset(ctx, member);
+      } catch {
+        // ignore
+      }
+    })();
 
     // Update the confirmation UI and then remove it. Prefer the
     // interaction reply API (works for ephemeral), and fall back to
