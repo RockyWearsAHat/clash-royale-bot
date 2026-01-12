@@ -1844,6 +1844,7 @@ export async function handleProfileInteraction(ctx: AppContext, interaction: But
     }
 
     await interaction.editReply({ content: '', embeds: [], components: [] }).catch(() => undefined);
+    await interaction.deleteReply().catch(() => undefined);
   }
 }
 
