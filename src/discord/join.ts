@@ -1804,7 +1804,14 @@ export async function handleProfileInteraction(ctx: AppContext, interaction: But
     dbDeleteJobState(ctx.db, `profile:uiMessage:${userId}`);
     dbDeleteJobState(ctx.db, nicknameMenuStateKey(userId));
 
-    // Best-effort: remove bot-managed roles and nudge them back into verification.
+    let thread: ThreadChannel | null = null;
+    try {
+      thread = await ensureVerificationThreadForUser(ctx, interaction.client, userId);
+    } catch {
+      thread = null;
+    }
+
+    // Best-effort: strip clan roles and remove onboarding-access role so only the verification channel remains.
     try {
       const member = await guild.members.fetch(userId);
 
@@ -1817,30 +1824,16 @@ export async function handleProfileInteraction(ctx: AppContext, interaction: But
       const toRemove = clanRoleIds.filter((rid) => member.roles.cache.has(rid));
       if (toRemove.length) await member.roles.remove(toRemove).catch(() => undefined);
 
-      // Remove bot-managed roles so the user falls back to locked-down onboarding access.
       if (member.roles.cache.has(ctx.cfg.ROLE_NON_MEMBER_ID)) {
         await member.roles.remove(ctx.cfg.ROLE_NON_MEMBER_ID).catch(() => undefined);
       }
-
-      // Thread visibility is handled automatically when the user posts again.
     } catch {
       // ignore
     }
 
-    // Rename thread back to the verification flow and refresh.
-    if (interaction.channel && interaction.channel.isThread?.()) {
-      const setupName = `Verification — ${interaction.user.username}`.slice(0, 90);
-      await (interaction.channel as ThreadChannel).setName(setupName).catch(() => undefined);
-
-      // Force rebuild of the static thread message so it flips back to “Step 1”.
-      const priorUiId = dbGetJobState(ctx.db, `profile:uiMessage:${userId}`);
-      if (priorUiId) {
-        await deleteMessageIfExists(interaction.channel as ThreadChannel, priorUiId);
-        dbDeleteJobState(ctx.db, `profile:uiMessage:${userId}`);
-      }
-      await renderOrUpdateProfileMessage(ctx, interaction.channel as ThreadChannel, userId);
+    if (thread) {
       const uiId = dbGetJobState(ctx.db, `profile:uiMessage:${userId}`) ?? '';
-      await cleanupThreadMessagesKeep(interaction.channel as ThreadChannel, [uiId]);
+      await cleanupThreadMessagesKeep(thread, [uiId]).catch(() => undefined);
     }
 
     await interaction.editReply({ content: '', embeds: [], components: [] }).catch(() => undefined);

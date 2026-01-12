@@ -107,9 +107,14 @@ export async function syncRolesOnce(ctx: AppContext, guild: Guild) {
   }
 }
 
+// Legacy helper kept for compatibility. It now just strips clan roles without
+// re-applying the non-member role so unlinked users are pushed back into verification.
 export async function enforceUnlinkedMemberVanquished(ctx: AppContext, member: GuildMember) {
   if (member.user.bot) return;
   await applyMemberRoles(ctx, member, undefined, { assignVanquishedOnMissingClan: false });
+  if (member.roles.cache.has(ctx.cfg.ROLE_NON_MEMBER_ID)) {
+    await member.roles.remove(ctx.cfg.ROLE_NON_MEMBER_ID).catch(() => undefined);
+  }
 }
 
 export async function enforceLinkedMemberRoles(
