@@ -31,8 +31,6 @@ import { maybeRunNicknameToTagMigration } from './discord/nicknameMigration.js';
 import { listGuildMembersPage } from './discord/guildMembers.js';
 import { dbDeleteJobState, dbGetJobState, dbSetJobState } from './db.js';
 
-console.log('Starting Stupid Discord Bot...');
-
 const cfg = loadConfig();
 const db = openDb(cfg.SQLITE_PATH);
 migrate(db);
