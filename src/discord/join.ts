@@ -1364,12 +1364,37 @@ export async function handleVerificationThreadMessage(ctx: AppContext, msg: any)
     return;
   }
 
+  // Clear any prior pending/"validating" message for this user.
+  const priorPendingMsgId = dbGetJobState(ctx.db, pendingTagMessageKey(msg.author.id));
+  if (priorPendingMsgId) {
+    await deleteMessageIfExists(thread, priorPendingMsgId);
+  }
+
+  // Show a lightweight loading state so users know their tag is being
+  // checked before we hit the Clash API.
+  const loading = await thread
+    .send({
+      content: `<@${msg.author.id}> Validating your Clash Royale tag a0 a0(this may take a few seconds a0 a0 a0)…`,
+      allowedMentions: { users: [msg.author.id] },
+    })
+    .catch(() => null);
+  if (loading) {
+    dbSetJobState(ctx.db, pendingTagMessageKey(msg.author.id), loading.id);
+  }
+
   // Validate tag via Clash API
   let player;
   try {
     player = await ctx.clash.getPlayer(tag);
   } catch (err) {
     await msg.delete().catch(() => undefined);
+
+    // Best-effort: remove the loading/pending message.
+    const pendingMsgId = dbGetJobState(ctx.db, pendingTagMessageKey(msg.author.id));
+    if (pendingMsgId) {
+      await deleteMessageIfExists(thread, pendingMsgId);
+      dbDeleteJobState(ctx.db, pendingTagMessageKey(msg.author.id));
+    }
     const existingId = dbGetJobState(ctx.db, invalidTagMessageKey(msg.author.id));
     if (existingId) {
       await deleteMessageIfExists(thread, existingId);
@@ -1405,9 +1430,10 @@ export async function handleVerificationThreadMessage(ctx: AppContext, msg: any)
   };
   storePendingTag(ctx, msg.author.id, pendingState);
 
-  const priorPendingMsgId = dbGetJobState(ctx.db, pendingTagMessageKey(msg.author.id));
-  if (priorPendingMsgId) {
-    await deleteMessageIfExists(thread, priorPendingMsgId);
+  // Replace the loading/pending message (if any) with the confirmation card.
+  const pendingMsgId = dbGetJobState(ctx.db, pendingTagMessageKey(msg.author.id));
+  if (pendingMsgId) {
+    await deleteMessageIfExists(thread, pendingMsgId);
   }
 
   await renderOrUpdateProfileMessage(ctx, thread, msg.author.id);
@@ -1614,24 +1640,22 @@ export async function handleVerifyTagButton(ctx: AppContext, interaction: Button
     .catch(() => undefined);
 
   // Immediately sync Discord roles so users see the correct access without waiting for cron.
-  // Immediately sync Discord roles so users see the correct access without waiting for cron,
-  // but do it off the critical UI path.
-  void (async () => {
-    try {
-      const guild = await interaction.client.guilds.fetch(ctx.cfg.GUILD_ID);
-      const member = await guild.members.fetch(userId);
-      let clanRole: ClashClanMemberRole | undefined;
-      if (
-        player.clan?.tag &&
-        player.clan.tag.toUpperCase() === ctx.cfg.CLASH_CLAN_TAG.toUpperCase()
-      ) {
-        clanRole = player.clan.role as ClashClanMemberRole | undefined;
-      }
-      await enforceLinkedMemberRoles(ctx, member, clanRole);
-    } catch {
-      // ignore; cron-based sync will catch up shortly
+  // Immediately sync Discord roles so this member's access reflects the
+  // new linked state without waiting for cron.
+  try {
+    const guild = await interaction.client.guilds.fetch(ctx.cfg.GUILD_ID);
+    const member = await guild.members.fetch(userId);
+    let clanRole: ClashClanMemberRole | undefined;
+    if (
+      player.clan?.tag &&
+      player.clan.tag.toUpperCase() === ctx.cfg.CLASH_CLAN_TAG.toUpperCase()
+    ) {
+      clanRole = player.clan.role as ClashClanMemberRole | undefined;
     }
-  })();
+    await enforceLinkedMemberRoles(ctx, member, clanRole);
+  } catch {
+    // ignore; cron-based sync will catch up shortly
+  }
 
   setTimeout(() => interaction.message?.delete().catch(() => undefined), 12_000);
 }
@@ -1805,6 +1829,24 @@ export async function handleProfileInteraction(ctx: AppContext, interaction: But
     return;
   }
 
+  // Any time a user interacts with their profile buttons, best-effort
+  // refresh the static Profile card in the thread so it always reflects
+  // the current DB link state (avoids stale "linked" vs unlinked UI).
+  const ch = interaction.channel;
+  if (
+    ch &&
+    (ch.type === ChannelType.PrivateThread || ch.type === ChannelType.PublicThread) &&
+    ch.parentId === ctx.cfg.CHANNEL_VERIFICATION_ID
+  ) {
+    try {
+      await renderOrUpdateProfileMessage(ctx, ch as ThreadChannel, userId);
+      const uiId = dbGetJobState(ctx.db, `profile:uiMessage:${userId}`) ?? '';
+      if (uiId) scheduleThreadCleanupKeep(ch as ThreadChannel, [uiId]);
+    } catch {
+      // ignore
+    }
+  }
+
   const guild = await interaction.client.guilds.fetch(ctx.cfg.GUILD_ID);
 
   // Legacy support: old thread buttons might still have customId menu:<id>:open
@@ -1931,15 +1973,14 @@ export async function handleProfileInteraction(ctx: AppContext, interaction: But
       await refreshProfileThreadForUser(ctx, interaction.client, userId);
     }
 
-    // Best-effort: strip every removable role; do not block UI on this.
-    void (async () => {
-      try {
-        const member = await guild.members.fetch(userId);
-        await enforceUnlinkedMemberRoleReset(ctx, member);
-      } catch {
-        // ignore
-      }
-    })();
+    // Best-effort: strip every removable role for this member immediately
+    // so permissions match the new unlinked state without waiting on cron.
+    try {
+      const member = await guild.members.fetch(userId);
+      await enforceUnlinkedMemberRoleReset(ctx, member);
+    } catch {
+      // ignore
+    }
 
     // Update the confirmation UI and then remove it. Prefer the
     // interaction reply API (works for ephemeral), and fall back to
