@@ -30,6 +30,7 @@ import { syncRolesOnce, enforceUnlinkedMemberRoleReset } from './discord/roleSyn
 import { maybeRunNicknameToTagMigration } from './discord/nicknameMigration.js';
 import { listGuildMembersPage } from './discord/guildMembers.js';
 import { dbDeleteJobState, dbGetJobState, dbSetJobState } from './db.js';
+import { AdminUnlinkCommand, handleAdminUnlinkSelect } from './discord/adminUnlink.js';
 
 const cfg = loadConfig();
 const db = openDb(cfg.SQLITE_PATH);
@@ -56,6 +57,7 @@ registerHandlers(client, ctx, [
   NotifyWhenSpotCommand,
   NotifyNoMoreCommand,
   PingUnusedDecksCommand,
+  AdminUnlinkCommand,
 ]);
 
 client.on('guildMemberAdd', async (member) => {
@@ -119,6 +121,10 @@ client.on('interactionCreate', async (interaction) => {
       await handleProfileInteraction(ctx, interaction);
       await handleStatsPublishButton(ctx, interaction);
       await handleWarlogsPublishButton(ctx, interaction);
+    }
+
+    if (interaction.isStringSelectMenu()) {
+      await handleAdminUnlinkSelect(ctx, interaction);
     }
 
     if (interaction.isModalSubmit()) {

@@ -3,6 +3,7 @@ import type { SlashCommand } from './commands.js';
 import type { AppContext } from '../types.js';
 import { successEmbed } from './ui.js';
 import { enforceUnlinkedMemberRoleReset } from './roleSync.js';
+import { ensureVerificationThreadForUser } from './join.js';
 
 export const UnlinkCommand: SlashCommand = {
   data: new SlashCommandBuilder()
@@ -16,6 +17,13 @@ export const UnlinkCommand: SlashCommand = {
       const guild = await interaction.client.guilds.fetch(ctx.cfg.GUILD_ID);
       const member = await guild.members.fetch(interaction.user.id);
       await enforceUnlinkedMemberRoleReset(ctx, member);
+    } catch {
+      // ignore
+    }
+
+    // Refresh the verification thread UI so it reflects the unlinked state immediately.
+    try {
+      await ensureVerificationThreadForUser(ctx, interaction.client, interaction.user.id);
     } catch {
       // ignore
     }
