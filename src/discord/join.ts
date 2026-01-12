@@ -1035,48 +1035,16 @@ export async function repairVerificationThreadsOnce(ctx: AppContext, client: any
       continue;
     }
 
-    // If the user is no longer linked but their static UI message still
-    // advertises a linked state, treat this thread as invalid legacy state
-    // and delete it so startup can recreate a clean verification thread.
+    // If the user is no longer linked, force their static Profile card
+    // to show the unlinked Step 1 state and keep the thread clean. This
+    // avoids "linked" UI while unlinked without deleting threads.
     const linkRow = getLinkRow(ctx, userId);
     if (!linkRow) {
-      const uiKey = `profile:uiMessage:${userId}`;
-      const uiId = dbGetJobState(ctx.db, uiKey);
-      if (uiId) {
-        const msg = await t.messages.fetch(uiId).catch(() => null);
-        if (msg) {
-          const embed = Array.isArray((msg as any).embeds) ? (msg as any).embeds[0] : undefined;
-          const desc = String((embed as any)?.description ?? '').toLowerCase();
-          if (desc.includes('linked to')) {
-            try {
-              await t.delete('Repair pass: deleting invalid unlinked profile thread');
-            } catch {
-              await t
-                .setLocked(
-                  true,
-                  'Repair pass: locking invalid unlinked profile thread (delete failed)',
-                )
-                .catch(() => undefined);
-              await t
-                .setArchived(
-                  true,
-                  'Repair pass: archiving invalid unlinked profile thread (delete failed)',
-                )
-                .catch(() => undefined);
-            }
-
-            dbDeleteJobState(ctx.db, p.key);
-            dbDeleteJobState(ctx.db, uiKey);
-            dbDeleteJobState(ctx.db, `profile:infoMessage:${userId}`);
-            dbDeleteJobState(ctx.db, `profile:controlsMessage:${userId}`);
-            dbDeleteJobState(ctx.db, `profile:infoHash:${userId}`);
-            dbDeleteJobState(ctx.db, `profile:controlsHash:${userId}`);
-
-            await new Promise((r) => setTimeout(r, 150));
-            continue;
-          }
-        }
-      }
+      await renderOrUpdateProfileMessage(ctx, t, userId);
+      const uiId = dbGetJobState(ctx.db, `profile:uiMessage:${userId}`) ?? '';
+      if (uiId) scheduleThreadCleanupKeep(t, [uiId]);
+      await new Promise((r) => setTimeout(r, 150));
+      continue;
     }
 
     // If the user is already a member, leave it alone.
