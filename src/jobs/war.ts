@@ -355,12 +355,12 @@ function inferDayIndexFromPeriodLogs(payload: any): number | undefined {
   const logs = Array.isArray(payload?.periodLogs) ? payload.periodLogs : [];
   if (!logs.length) return undefined;
 
-  const indices = logs
-    .map((entry) => toFiniteInt((entry as any)?.periodIndex))
-    .filter((idx): idx is number => typeof idx === 'number' && Number.isFinite(idx));
+  const indices: number[] = logs
+    .map((entry: { periodIndex?: unknown }) => toFiniteInt(entry?.periodIndex))
+    .filter((idx: number | undefined): idx is number => typeof idx === 'number' && Number.isFinite(idx));
   if (!indices.length) return undefined;
 
-  const uniqueSorted = Array.from(new Set(indices)).sort((a, b) => a - b);
+  const uniqueSorted = [...new Set<number>(indices)].sort((a, b) => a - b);
   const currentIndex = toFiniteInt(payload?.periodIndex);
 
   if (currentIndex !== undefined) {
