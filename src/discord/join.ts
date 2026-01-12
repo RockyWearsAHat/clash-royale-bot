@@ -1829,24 +1829,6 @@ export async function handleProfileInteraction(ctx: AppContext, interaction: But
     return;
   }
 
-  // Any time a user interacts with their profile buttons, best-effort
-  // refresh the static Profile card in the thread so it always reflects
-  // the current DB link state (avoids stale "linked" vs unlinked UI).
-  const ch = interaction.channel;
-  if (
-    ch &&
-    (ch.type === ChannelType.PrivateThread || ch.type === ChannelType.PublicThread) &&
-    ch.parentId === ctx.cfg.CHANNEL_VERIFICATION_ID
-  ) {
-    try {
-      await renderOrUpdateProfileMessage(ctx, ch as ThreadChannel, userId);
-      const uiId = dbGetJobState(ctx.db, `profile:uiMessage:${userId}`) ?? '';
-      if (uiId) scheduleThreadCleanupKeep(ch as ThreadChannel, [uiId]);
-    } catch {
-      // ignore
-    }
-  }
-
   const guild = await interaction.client.guilds.fetch(ctx.cfg.GUILD_ID);
 
   // Legacy support: old thread buttons might still have customId menu:<id>:open
