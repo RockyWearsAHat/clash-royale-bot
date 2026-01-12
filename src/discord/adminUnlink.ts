@@ -167,6 +167,8 @@ async function unlinkDiscordUser(
     // ignore
   }
 
+  // Ensure their verification/profile thread immediately reflects the
+  // unlinked state so there is no confusing limbo.
   try {
     await ensureVerificationThreadForUser(ctx, client, userId);
   } catch {
