@@ -1566,9 +1566,34 @@ export async function handleVerifyTagButton(ctx: AppContext, interaction: Button
 
   clearPendingTag(ctx, userId);
   dbDeleteJobState(ctx.db, invalidTagMessageKey(userId));
-  const thread = await refreshProfileThreadForUser(ctx, interaction.client, userId);
-  const uiId = dbGetJobState(ctx.db, `profile:uiMessage:${userId}`);
-  if (uiId) keepIds.add(uiId);
+  dbDeleteJobState(ctx.db, `profile:uiMessage:${userId}`);
+
+  // Refresh the profile thread UI in-place first so the user sees the
+  // linked state immediately, then update roles in the background.
+  let targetThread: ThreadChannel | null = null;
+  if (channel.isThread?.() && channel.parentId === ctx.cfg.CHANNEL_VERIFICATION_ID) {
+    const thread = channel as ThreadChannel;
+    try {
+      await thread.setName(`Profile - ${player.name}`.slice(0, 90)).catch(() => undefined);
+    } catch {
+      // ignore rename errors
+    }
+
+    await renderOrUpdateProfileMessage(ctx, thread, userId);
+    const uiId = dbGetJobState(ctx.db, `profile:uiMessage:${userId}`) ?? '';
+    if (uiId) keepIds.add(uiId);
+    scheduleThreadCleanupKeep(thread, [...keepIds]);
+    dbSetJobState(ctx.db, `verify:thread:${userId}`, thread.id);
+    targetThread = thread;
+  } else {
+    const thread = await refreshProfileThreadForUser(ctx, interaction.client, userId);
+    if (thread) {
+      const uiId = dbGetJobState(ctx.db, `profile:uiMessage:${userId}`) ?? '';
+      if (uiId) keepIds.add(uiId);
+      scheduleThreadCleanupKeep(thread, [...keepIds]);
+      targetThread = thread;
+    }
+  }
 
   await interaction
     .editReply({
@@ -1578,23 +1603,25 @@ export async function handleVerifyTagButton(ctx: AppContext, interaction: Button
     })
     .catch(() => undefined);
 
-  scheduleThreadCleanupKeep(channel as ThreadChannel, [...keepIds]);
-
   // Immediately sync Discord roles so users see the correct access without waiting for cron.
-  try {
-    const guild = await interaction.client.guilds.fetch(ctx.cfg.GUILD_ID);
-    const member = await guild.members.fetch(userId);
-    let clanRole: ClashClanMemberRole | undefined;
-    if (
-      player.clan?.tag &&
-      player.clan.tag.toUpperCase() === ctx.cfg.CLASH_CLAN_TAG.toUpperCase()
-    ) {
-      clanRole = player.clan.role as ClashClanMemberRole | undefined;
+  // Immediately sync Discord roles so users see the correct access without waiting for cron,
+  // but do it off the critical UI path.
+  void (async () => {
+    try {
+      const guild = await interaction.client.guilds.fetch(ctx.cfg.GUILD_ID);
+      const member = await guild.members.fetch(userId);
+      let clanRole: ClashClanMemberRole | undefined;
+      if (
+        player.clan?.tag &&
+        player.clan.tag.toUpperCase() === ctx.cfg.CLASH_CLAN_TAG.toUpperCase()
+      ) {
+        clanRole = player.clan.role as ClashClanMemberRole | undefined;
+      }
+      await enforceLinkedMemberRoles(ctx, member, clanRole);
+    } catch {
+      // ignore; cron-based sync will catch up shortly
     }
-    await enforceLinkedMemberRoles(ctx, member, clanRole);
-  } catch {
-    // ignore; cron-based sync will catch up shortly
-  }
+  })();
 
   setTimeout(() => interaction.message?.delete().catch(() => undefined), 12_000);
 }
@@ -1867,15 +1894,42 @@ export async function handleProfileInteraction(ctx: AppContext, interaction: But
     dbDeleteJobState(ctx.db, `profile:uiMessage:${userId}`);
     dbDeleteJobState(ctx.db, nicknameMenuStateKey(userId));
 
-    // Best-effort: strip every removable role immediately.
-    try {
-      const member = await guild.members.fetch(userId);
-      await enforceUnlinkedMemberRoleReset(ctx, member);
-    } catch {
-      // ignore
+    // Refresh the profile thread UI in-place first so the user sees the
+    // unlinked state immediately, then fix roles in the background.
+    const ch = interaction.channel;
+    if (
+      ch &&
+      (ch.type === ChannelType.PrivateThread || ch.type === ChannelType.PublicThread) &&
+      ch.parentId === ctx.cfg.CHANNEL_VERIFICATION_ID
+    ) {
+      const thread = ch as ThreadChannel;
+
+      try {
+        const user = await interaction.client.users.fetch(userId).catch(() => null);
+        const username = user?.username ?? 'Discord Username';
+        const setupName = `Verification — ${username}`.slice(0, 90);
+        await thread.setName(setupName).catch(() => undefined);
+      } catch {
+        // ignore rename errors
+      }
+
+      await renderOrUpdateProfileMessage(ctx, thread, userId);
+      const uiId = dbGetJobState(ctx.db, `profile:uiMessage:${userId}`) ?? '';
+      if (uiId) scheduleThreadCleanupKeep(thread, [uiId]);
+      dbSetJobState(ctx.db, `verify:thread:${userId}`, thread.id);
+    } else {
+      await refreshProfileThreadForUser(ctx, interaction.client, userId);
     }
 
-    const thread = await refreshProfileThreadForUser(ctx, interaction.client, userId);
+    // Best-effort: strip every removable role; do not block UI on this.
+    void (async () => {
+      try {
+        const member = await guild.members.fetch(userId);
+        await enforceUnlinkedMemberRoleReset(ctx, member);
+      } catch {
+        // ignore
+      }
+    })();
 
     // Update the confirmation UI and then remove it. Prefer the
     // interaction reply API (works for ephemeral), and fall back to
