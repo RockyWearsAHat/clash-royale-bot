@@ -917,6 +917,109 @@ async function getOrCreateVerificationThread(
   return thread;
 }
 
+/**
+ * Unarchive all tracked profile/verification threads on startup.
+ * This handles the case where the bot was offline when Discord auto-archived threads.
+ * Runs early in the startup sequence so threads are visible before other operations.
+ */
+export async function unarchiveAllTrackedThreads(ctx: AppContext, client: any): Promise<void> {
+  const channel = await client.channels.fetch(ctx.cfg.CHANNEL_VERIFICATION_ID).catch(() => null);
+  if (!channel || channel.type !== ChannelType.GuildText) return;
+  const textChannel = channel as TextChannel;
+
+  // Build a map of all threads (active AND archived) by ID for reliable lookup.
+  // Direct .fetch(id) doesn't always return archived private threads.
+  const threadById = new Map<string, ThreadChannel>();
+
+  // Fetch active threads.
+  const active = await textChannel.threads.fetchActive().catch(() => null);
+  if (active?.threads?.values) {
+    for (const t of active.threads.values()) threadById.set(t.id, t);
+  }
+
+  // Fetch archived private threads (paginated).
+  let before: string | undefined = undefined;
+  let pages = 0;
+  while (pages < 10) {
+    const res: any = await textChannel.threads
+      .fetchArchived({ type: 'private', limit: 100, before })
+      .catch(() => null);
+    if (!res) break;
+
+    const threads: ThreadChannel[] = Array.from(res.threads.values());
+    for (const t of threads) threadById.set(t.id, t);
+
+    pages++;
+    if (!threads.length) break;
+    before = String(threads[threads.length - 1]?.id ?? '');
+    const hasMore = Boolean((res as any)?.hasMore);
+    if (!hasMore) break;
+  }
+
+  // Also fetch archived public threads just in case.
+  before = undefined;
+  pages = 0;
+  while (pages < 5) {
+    const res: any = await textChannel.threads
+      .fetchArchived({ type: 'public', limit: 100, before })
+      .catch(() => null);
+    if (!res) break;
+
+    const threads: ThreadChannel[] = Array.from(res.threads.values());
+    for (const t of threads) threadById.set(t.id, t);
+
+    pages++;
+    if (!threads.length) break;
+    before = String(threads[threads.length - 1]?.id ?? '');
+    const hasMore = Boolean((res as any)?.hasMore);
+    if (!hasMore) break;
+  }
+
+  // Collect all tracked thread pointers from DB.
+  const pointers = ctx.db
+    .prepare("SELECT key, value FROM job_state WHERE key LIKE 'verify:thread:%'")
+    .all() as Array<{ key: string; value: string }>;
+
+  let unarchived = 0;
+  for (const p of pointers) {
+    const threadId = String(p.value ?? '').trim();
+    if (!threadId) continue;
+
+    // Look up in our pre-fetched map (includes archived threads).
+    const thread = threadById.get(threadId);
+    if (!thread) continue;
+
+    // If the thread is archived, unarchive it.
+    if (thread.archived) {
+      try {
+        await thread.setArchived(false, 'Startup: unarchiving profile thread');
+        unarchived++;
+        console.log(`Unarchived thread: ${thread.name} (${thread.id})`);
+      } catch (e) {
+        const msg = e instanceof Error ? e.message : String(e);
+        console.warn(`Failed to unarchive thread ${thread.id}: ${msg}`);
+      }
+    }
+    // If locked, unlock it.
+    if (thread.locked) {
+      try {
+        await thread.setLocked(false, 'Startup: unlocking profile thread');
+      } catch {
+        // ignore
+      }
+    }
+
+    // Small delay to avoid rate-limiting.
+    await new Promise((r) => setTimeout(r, 100));
+  }
+
+  if (unarchived > 0) {
+    console.log(`Unarchived ${unarchived} profile thread(s) on startup.`);
+  } else {
+    console.log('No archived profile threads found to unarchive.');
+  }
+}
+
 export async function repairVerificationThreadsOnce(ctx: AppContext, client: any): Promise<void> {
   // Goal: cleanup/repair ONLY. No recreations.
   // - Fix archived/locked state

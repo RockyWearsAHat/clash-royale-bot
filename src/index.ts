@@ -18,6 +18,7 @@ import {
   refreshProfileThreadMainMenuMessage,
   refreshOpenNicknameMenuIfAny,
   repairVerificationThreadsOnce,
+  unarchiveAllTrackedThreads,
 } from './discord/join.js';
 import { WarLogsCommand, WarStatsCommand } from './discord/warstats.js';
 import { handleWarlogsPublishButton } from './discord/warstats.js';
@@ -160,102 +161,116 @@ client.on('interactionCreate', async (interaction) => {
 });
 
 client.once('ready', async () => {
-  console.log(`Logged in as ${client.user?.tag}`);
-
-  let guild: any;
   try {
-    guild = await client.guilds.fetch(cfg.GUILD_ID);
-  } catch {
-    guild = null;
-  }
+    console.log(`Logged in as ${client.user?.tag}`);
 
-  // Always enforce channel permissions on startup so operators don't need to run a manual command.
-  try {
-    if (guild) await enforceChannelPermissions(ctx, client, guild);
-    console.log('Channel permission overwrites enforced.');
-  } catch (e) {
-    const msg = e instanceof Error ? e.message : String(e);
-    console.warn('Failed to enforce channel permissions:', msg);
-  }
-
-  // Keep roles aligned immediately on startup (not just on the first cron tick).
-  try {
-    if (guild) await syncRolesOnce(ctx, guild);
-  } catch {
-    // ignore
-  }
-
-  // Create threads for all currently-unlinked members (no manual command required).
-  // Runs once at startup; safe to re-run due to job_state reuse.
-  (async () => {
+    let guild: any;
     try {
-      if (!guild) guild = await client.guilds.fetch(cfg.GUILD_ID);
+      guild = await client.guilds.fetch(cfg.GUILD_ID);
+    } catch {
+      guild = null;
+    }
 
-      // Optional one-time migration: nickname -> clan tag -> user_links.
-      // Runs before thread reconciliation so newly-linked users get proper threads.
-      await maybeRunNicknameToTagMigration(ctx, guild);
+    // Always enforce channel permissions on startup so operators don't need to run a manual command.
+    try {
+      if (guild) await enforceChannelPermissions(ctx, client, guild);
+      console.log('Channel permission overwrites enforced.');
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      console.warn('Failed to enforce channel permissions:', msg);
+    }
 
-      // Re-sync roles after migration so permissions/visibility update quickly.
-      await syncRolesOnce(ctx, guild);
+    // Keep roles aligned immediately on startup (not just on the first cron tick).
+    try {
+      if (guild) await syncRolesOnce(ctx, guild);
+    } catch {
+      // ignore
+    }
 
-      const linkedRows = ctx.db.prepare('SELECT discord_user_id FROM user_links').all() as Array<{
-        discord_user_id: string;
-      }>;
-      const linkedIds = new Set(linkedRows.map((r) => r.discord_user_id));
+    // Unarchive any profile threads that were archived while the bot was offline.
+    // This runs early so threads are visible before other operations try to access them.
+    try {
+      await unarchiveAllTrackedThreads(ctx, client);
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      console.warn('Failed to unarchive threads on startup:', msg);
+    }
 
-      // First, ensure linked users have an up-to-date profile thread.
-      // This re-renders the state-machine UI on every boot.
-      for (const row of linkedRows) {
-        if (cfg.DEV_RECREATE_PROFILE_THREADS) {
-          await recreateProfileThreadForUser(ctx, client, row.discord_user_id);
-        } else {
-          await ensureVerificationThreadForUser(ctx, client, row.discord_user_id);
-        }
-        await new Promise((r) => setTimeout(r, 250));
-      }
-
-      // Validation/repair pass: clean up duplicates and ensure members can access their canonical thread.
-      // No recreations are performed here.
+    // Create threads for all currently-unlinked members (no manual command required).
+    // Runs once at startup; safe to re-run due to job_state reuse.
+    (async () => {
       try {
-        await repairVerificationThreadsOnce(ctx, client);
-      } catch {
-        // ignore
-      }
+        if (!guild) guild = await client.guilds.fetch(cfg.GUILD_ID);
 
-      // Ensure unlinked users stay isolated and have a verification thread on every startup.
-      // Uses REST pagination (avoids gateway opcode 8) and always scans the full guild
-      // so state cannot drift over time.
-      let after: string | undefined = undefined;
-      while (true) {
-        const page = await listGuildMembersPage(guild, { after, limit: 1000 });
-        if (!page.length) break;
+        // Optional one-time migration: nickname -> clan tag -> user_links.
+        // Runs before thread reconciliation so newly-linked users get proper threads.
+        await maybeRunNicknameToTagMigration(ctx, guild);
 
-        for (const member of page) {
-          if (member.user.bot) continue;
-          if (linkedIds.has(member.id)) continue;
+        // Re-sync roles after migration so permissions/visibility update quickly.
+        await syncRolesOnce(ctx, guild);
 
-          await enforceUnlinkedMemberRoleReset(ctx, member);
-          await ensureVerificationThreadForUser(ctx, client, member.id);
+        const linkedRows = ctx.db.prepare('SELECT discord_user_id FROM user_links').all() as Array<{
+          discord_user_id: string;
+        }>;
+        const linkedIds = new Set(linkedRows.map((r) => r.discord_user_id));
+
+        // First, ensure linked users have an up-to-date profile thread.
+        // This re-renders the state-machine UI on every boot.
+        for (const row of linkedRows) {
+          if (cfg.DEV_RECREATE_PROFILE_THREADS) {
+            await recreateProfileThreadForUser(ctx, client, row.discord_user_id);
+          } else {
+            await ensureVerificationThreadForUser(ctx, client, row.discord_user_id);
+          }
           await new Promise((r) => setTimeout(r, 250));
         }
 
-        after = page[page.length - 1]?.id;
-      }
+        // Validation/repair pass: clean up duplicates and ensure members can access their canonical thread.
+        // No recreations are performed here.
+        try {
+          await repairVerificationThreadsOnce(ctx, client);
+        } catch {
+          // ignore
+        }
 
-      // Final cleanup: the unlinked scan can create new threads; delete any bot-only or unusable ones.
-      try {
-        await repairVerificationThreadsOnce(ctx, client);
-      } catch {
-        // ignore
-      }
-    } catch (e) {
-      const msg = e instanceof Error ? e.message : String(e);
-      console.warn('Startup task failed:', msg);
-      dbAudit(ctx.db, 'startup_task_error', msg);
-    }
-  })();
+        // Ensure unlinked users stay isolated and have a verification thread on every startup.
+        // Uses REST pagination (avoids gateway opcode 8) and always scans the full guild
+        // so state cannot drift over time.
+        let after: string | undefined = undefined;
+        while (true) {
+          const page = await listGuildMembersPage(guild, { after, limit: 1000 });
+          if (!page.length) break;
 
-  startScheduler(ctx, client);
+          for (const member of page) {
+            if (member.user.bot) continue;
+            if (linkedIds.has(member.id)) continue;
+
+            await enforceUnlinkedMemberRoleReset(ctx, member);
+            await ensureVerificationThreadForUser(ctx, client, member.id);
+            await new Promise((r) => setTimeout(r, 250));
+          }
+
+          after = page[page.length - 1]?.id;
+        }
+
+        // Final cleanup: the unlinked scan can create new threads; delete any bot-only or unusable ones.
+        try {
+          await repairVerificationThreadsOnce(ctx, client);
+        } catch {
+          // ignore
+        }
+      } catch (e) {
+        const msg = e instanceof Error ? e.message : String(e);
+        console.warn('Startup task failed:', msg);
+        dbAudit(ctx.db, 'startup_task_error', msg);
+      }
+    })();
+
+    startScheduler(ctx, client);
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    console.error('FATAL ERROR in ready handler:', msg, e);
+  }
 });
 
 await client.login(cfg.DISCORD_TOKEN);
