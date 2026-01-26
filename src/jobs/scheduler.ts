@@ -2,7 +2,7 @@ import cron from 'node-cron';
 import type { Client } from 'discord.js';
 import type { AppContext } from '../types.js';
 import { syncRolesOnce } from '../discord/roleSync.js';
-import { reconcileVerificationThreadForUser } from '../discord/join.js';
+import { reconcileVerificationThreadForUser, keepProfileThreadsAlive } from '../discord/join.js';
 import { enforceChannelPermissions } from '../discord/permissions.js';
 import { pollWarOnce, primeWarDaySnapshotSchedule } from './war.js';
 import { dbGetJobState, dbSetJobState } from '../db.js';
@@ -78,5 +78,26 @@ export function startScheduler(ctx: AppContext, client: Client) {
         .prepare('INSERT INTO audit_log(type, message) VALUES(?, ?)')
         .run('empty_spot_error', msg);
     }
+  });
+
+  // Keep profile threads alive by unarchiving them daily.
+  // Discord's max autoArchiveDuration is 7 days, so running every 6 hours is plenty.
+  cron.schedule('0 */6 * * *', async () => {
+    try {
+      await keepProfileThreadsAlive(ctx, client);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      ctx.db
+        .prepare('INSERT INTO audit_log(type, message) VALUES(?, ?)')
+        .run('keep_threads_alive_error', msg);
+    }
+  });
+
+  // Also run once at startup to immediately unarchive any threads that archived while the bot was down.
+  void keepProfileThreadsAlive(ctx, client).catch((err) => {
+    const msg = err instanceof Error ? err.message : String(err);
+    ctx.db
+      .prepare('INSERT INTO audit_log(type, message) VALUES(?, ?)')
+      .run('keep_threads_alive_startup_error', msg);
   });
 }

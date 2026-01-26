@@ -110,6 +110,29 @@ client.on('messageCreate', async (msg) => {
   }
 });
 
+// Immediately unarchive profile threads when Discord auto-archives them.
+// This makes threads effectively "never archive".
+client.on('threadUpdate', async (oldThread, newThread) => {
+  try {
+    // Only care about threads that just became archived.
+    if (!newThread.archived || oldThread.archived) return;
+    if (newThread.parentId !== cfg.CHANNEL_VERIFICATION_ID) return;
+
+    // Check if this is a tracked profile thread.
+    const pointers = ctx.db
+      .prepare("SELECT key FROM job_state WHERE key LIKE 'verify:thread:%' AND value = ?")
+      .all(newThread.id) as Array<{ key: string }>;
+
+    if (pointers.length > 0) {
+      await newThread
+        .setArchived(false, 'Profile threads should never archive')
+        .catch(() => undefined);
+    }
+  } catch {
+    // ignore
+  }
+});
+
 client.on('interactionCreate', async (interaction) => {
   try {
     if (interaction.isButton()) {

@@ -1277,6 +1277,44 @@ export async function reconcileVerificationThreadForUser(
   await getOrCreateVerificationThread(ctx, client, userId);
 }
 
+/**
+ * Keep all linked users' profile threads unarchived.
+ * Discord's max autoArchiveDuration is 7 days, so run this daily to prevent threads from disappearing.
+ * This is a lightweight operation - it only unarchives, doesn't re-render or clean up.
+ */
+export async function keepProfileThreadsAlive(ctx: AppContext, client: any): Promise<void> {
+  const channel = await client.channels.fetch(ctx.cfg.CHANNEL_VERIFICATION_ID).catch(() => null);
+  if (!channel || channel.type !== ChannelType.GuildText) return;
+  const textChannel = channel as TextChannel;
+
+  const pointers = ctx.db
+    .prepare("SELECT key, value FROM job_state WHERE key LIKE 'verify:thread:%'")
+    .all() as Array<{ key: string; value: string }>;
+
+  let unarchived = 0;
+  for (const p of pointers) {
+    const threadId = String(p.value ?? '').trim();
+    if (!threadId) continue;
+
+    const thread = await textChannel.threads.fetch(threadId).catch(() => null);
+    if (!thread) continue;
+
+    if (thread.archived) {
+      await thread
+        .setArchived(false, 'Keeping profile thread alive (scheduled job)')
+        .catch(() => undefined);
+      unarchived++;
+    }
+
+    // Small delay to avoid rate limits.
+    await new Promise((r) => setTimeout(r, 100));
+  }
+
+  if (unarchived > 0) {
+    console.log(`[keepProfileThreadsAlive] Unarchived ${unarchived} thread(s).`);
+  }
+}
+
 export async function ensureVerificationThreadForUser(
   ctx: AppContext,
   client: any,
