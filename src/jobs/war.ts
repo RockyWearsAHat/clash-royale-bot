@@ -575,6 +575,7 @@ export async function pollWarOnce(ctx: AppContext, client: Client) {
   const payload = await ctx.clash.getCurrentRiverRace(ctx.cfg.CLASH_CLAN_TAG);
   const periodType = typeof payload?.periodType === 'string' ? payload.periodType : undefined;
   const isBattleDay = isRegularWarBattleDay(payload);
+  const warDayIndex = inferWarDayIndex(payload, extractParticipants(payload));
 
   // Best-effort: keep an accumulated war history in SQLite.
   await ingestRiverRaceLog(ctx).catch(() => undefined);
@@ -619,9 +620,10 @@ export async function pollWarOnce(ctx: AppContext, client: Client) {
       const ann = await guild.channels.fetch(ctx.cfg.CHANNEL_ANNOUNCEMENTS_ID);
       if (ann && ann.type === ChannelType.GuildText) {
         // Only announce the start of the regular war battle days (day 1).
-        const idx = inferWarDayIndex(payload, next);
-
-        if (prevPeriod && isBattleDay && (idx === undefined || idx === 1)) {
+        // Require explicit warday/colosseum periodType to avoid false positives.
+        const periodTypeLower = periodType?.trim().toLowerCase();
+        const isExplicitBattleDay = periodTypeLower === 'warday' || periodTypeLower === 'colosseum';
+        if (prevPeriod && isBattleDay && isExplicitBattleDay && warDayIndex === 1) {
           await ann
             .send({
               content: '@everyone War day started — do your battles.',
@@ -637,7 +639,17 @@ export async function pollWarOnce(ctx: AppContext, client: Client) {
   // Posts at the configured local time once per local date (in the specified timezone).
   if (ctx.cfg.WAR_DAY_NOTIFICATION_TIME) {
     const parsed = parseTimeOfDayWithTimeZone(ctx.cfg.WAR_DAY_NOTIFICATION_TIME);
-    if (parsed.ok && isBattleDay) {
+    // Require explicit battle-day periodType to avoid false positives during training/prep days.
+    const periodTypeLower = periodType?.trim().toLowerCase();
+    const isExplicitBattleDay = periodTypeLower === 'warday' || periodTypeLower === 'colosseum';
+    if (
+      parsed.ok &&
+      isBattleDay &&
+      isExplicitBattleDay &&
+      warDayIndex &&
+      warDayIndex >= 1 &&
+      warDayIndex <= 4
+    ) {
       const now = new Date();
       const zoned = getZonedYmdHm(now, parsed.value.timeZone);
 
@@ -647,8 +659,7 @@ export async function pollWarOnce(ctx: AppContext, client: Client) {
         if (lastDate !== zoned.ymd) {
           const ann = await guild.channels.fetch(ctx.cfg.CHANNEL_ANNOUNCEMENTS_ID);
           if (ann && ann.type === ChannelType.GuildText) {
-            const idx = inferWarDayIndex(payload, next);
-            const dayLabel = Number.isFinite(idx) ? ` (Day ${idx})` : '';
+            const dayLabel = Number.isFinite(warDayIndex) ? ` (Day ${warDayIndex})` : '';
             await ann
               .send({
                 content: `@everyone War reminder${dayLabel} — do your battles.`,

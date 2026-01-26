@@ -1074,6 +1074,42 @@ export async function repairVerificationThreadsOnce(ctx: AppContext, client: any
     await new Promise((r) => setTimeout(r, 150));
   }
 
+  // Third pass: for any remaining bot-managed threads that weren't covered by
+  // pointers or linked rows, infer the owning user from thread members and
+  // force the static UI message to match the current DB link state.
+  // This protects against legacy/stale UI ("Linked to ...") after DB repair
+  // or upgrades, without requiring any user interaction.
+  try {
+    const allThreads = await listAllThreads();
+    for (const t of allThreads) {
+      if (!isBotManagedThreadName(t.name)) continue;
+
+      const members = await t.members.fetch().catch(() => null);
+      if (!members) continue;
+
+      const nonBot = Array.from(members.values()).filter((m) => m.id !== botId && !m.user?.bot);
+      if (nonBot.length !== 1) continue; // ambiguous; skip
+
+      const userId = nonBot[0].id;
+      const stateKey = `verify:thread:${userId}`;
+      const existingId = dbGetJobState(ctx.db, stateKey);
+
+      // If there's already a different canonical thread for this user,
+      // leave it to the earlier passes + closeOtherThreadsForUser to
+      // resolve; avoid changing ownership here.
+      if (existingId && existingId !== t.id) continue;
+
+      dbSetJobState(ctx.db, stateKey, t.id);
+      await renderOrUpdateProfileMessage(ctx, t, userId);
+      const uiId = dbGetJobState(ctx.db, `profile:uiMessage:${userId}`) ?? '';
+      if (uiId) scheduleThreadCleanupKeep(t, [uiId]);
+
+      await new Promise((r) => setTimeout(r, 150));
+    }
+  } catch {
+    // best-effort; ignore
+  }
+
   for (const row of linked) {
     const userId = row.discord_user_id;
     const user = await client.users.fetch(userId).catch(() => null);
@@ -1379,11 +1415,12 @@ export async function handleVerificationThreadMessage(ctx: AppContext, msg: any)
 
   // Show a lightweight loading state so users know their tag is being
   // checked before we hit the Clash API.
+  // NOTE: Don't ping the user - they're already in the thread watching.
   const tLoadingStart = Date.now();
   const loading = await thread
     .send({
-      content: `<@${msg.author.id}> Validating your Clash Royale tag… (this may take a few seconds)`,
-      allowedMentions: { users: [msg.author.id] },
+      content: `Validating your Clash Royale tag… (this may take a few seconds)`,
+      allowedMentions: { users: [] },
     })
     .catch(() => null);
   loadingMs = Date.now() - tLoadingStart;
@@ -1411,20 +1448,17 @@ export async function handleVerificationThreadMessage(ctx: AppContext, msg: any)
       await deleteMessageIfExists(thread, existingId);
       dbDeleteJobState(ctx.db, invalidTagMessageKey(msg.author.id));
     }
+    // NOTE: Don't ping the user - they're already in the thread watching.
+    // Also don't auto-delete error messages; keep the UI stable.
     const reply = await thread
       .send({
-        content: `<@${msg.author.id}> I couldn’t find that tag. Double-check the characters (0 vs O, 2 vs Z) and try again.`,
-        allowedMentions: { users: [msg.author.id] },
+        content: `I couldn't find that tag. Double-check the characters (0 vs O, 2 vs Z) and try again.`,
+        allowedMentions: { users: [] },
       })
       .catch(() => null);
     if (reply) {
       dbSetJobState(ctx.db, invalidTagMessageKey(msg.author.id), reply.id);
-      setTimeout(() => {
-        reply
-          .delete()
-          .catch(() => undefined)
-          .finally(() => dbDeleteJobState(ctx.db, invalidTagMessageKey(msg.author.id)));
-      }, 20_000);
+      // Don't auto-delete - the next paste will clean it up if needed.
     }
     outcome = 'clash_error';
     dbAudit(
@@ -1486,10 +1520,11 @@ export async function handleVerificationThreadMessage(ctx: AppContext, msg: any)
 
   const confirmation = await thread
     .send({
-      content: `<@${msg.author.id}> confirm this is your Clash Royale account.`,
+      // NOTE: Don't ping the user - they're already in the thread watching.
+      content: `Please confirm this is your Clash Royale account.`,
       embeds: [embed],
       components: [buttons],
-      allowedMentions: { users: [msg.author.id] },
+      allowedMentions: { users: [] },
     })
     .catch(() => null);
 
@@ -1881,6 +1916,24 @@ export async function handleProfileInteraction(ctx: AppContext, interaction: But
   }
 
   const guild = await interaction.client.guilds.fetch(ctx.cfg.GUILD_ID);
+
+  // Safety net: if the user is no longer linked in the DB but the
+  // static thread UI still shows "Linked to ...", refresh it to the
+  // unlinked Step 1 state before handling any menu actions.
+  const linkRow = getLinkRow(ctx, userId);
+  if (!linkRow) {
+    const ch = interaction.channel;
+    if (
+      ch &&
+      (ch.type === ChannelType.PrivateThread || ch.type === ChannelType.PublicThread) &&
+      ch.parentId === ctx.cfg.CHANNEL_VERIFICATION_ID
+    ) {
+      const thread = ch as ThreadChannel;
+      await renderOrUpdateProfileMessage(ctx, thread, userId);
+      const uiId = dbGetJobState(ctx.db, `profile:uiMessage:${userId}`) ?? '';
+      if (uiId) scheduleThreadCleanupKeep(thread, [uiId]);
+    }
+  }
 
   // Legacy support: old thread buttons might still have customId menu:<id>:open
   if (action === 'open') {

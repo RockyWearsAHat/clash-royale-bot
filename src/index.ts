@@ -199,41 +199,24 @@ client.once('ready', async () => {
         // ignore
       }
 
-      // Ensure unlinked users stay isolated and have a verification thread.
-      // Uses REST pagination (avoids gateway opcode 8) and checkpoints progress.
-      const scanDoneKey = 'startup:unlinked_scan:done';
-      const scanAfterKey = 'startup:unlinked_scan:after';
-      const scanDone = dbGetJobState(ctx.db, scanDoneKey);
-      let after = dbGetJobState(ctx.db, scanAfterKey) || undefined;
+      // Ensure unlinked users stay isolated and have a verification thread on every startup.
+      // Uses REST pagination (avoids gateway opcode 8) and always scans the full guild
+      // so state cannot drift over time.
+      let after: string | undefined = undefined;
+      while (true) {
+        const page = await listGuildMembersPage(guild, { after, limit: 1000 });
+        if (!page.length) break;
 
-      if (scanDone !== 'true') {
-        while (true) {
-          const page = await listGuildMembersPage(guild, { after, limit: 1000 });
-          if (!page.length) break;
+        for (const member of page) {
+          if (member.user.bot) continue;
+          if (linkedIds.has(member.id)) continue;
 
-          for (const member of page) {
-            if (member.user.bot) continue;
-            if (linkedIds.has(member.id)) continue;
-
-            await enforceUnlinkedMemberRoleReset(ctx, member);
-            await ensureVerificationThreadForUser(ctx, client, member.id);
-            await new Promise((r) => setTimeout(r, 250));
-          }
-
-          after = page[page.length - 1]?.id;
-          if (after) dbSetJobState(ctx.db, scanAfterKey, after);
+          await enforceUnlinkedMemberRoleReset(ctx, member);
+          await ensureVerificationThreadForUser(ctx, client, member.id);
+          await new Promise((r) => setTimeout(r, 250));
         }
 
-        dbSetJobState(ctx.db, scanDoneKey, 'true');
-        dbDeleteJobState(ctx.db, scanAfterKey);
-      }
-
-      // Always run one lightweight pass for newly joined unlinked users, even if the initial scan completed.
-      const recentPage = await listGuildMembersPage(guild, { limit: 1000 });
-      for (const member of recentPage) {
-        if (member.user.bot) continue;
-        if (linkedIds.has(member.id)) continue;
-        await enforceUnlinkedMemberRoleReset(ctx, member);
+        after = page[page.length - 1]?.id;
       }
 
       // Final cleanup: the unlinked scan can create new threads; delete any bot-only or unusable ones.

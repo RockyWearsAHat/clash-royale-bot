@@ -8,6 +8,8 @@ import {
 } from '../db.js';
 
 const MAX_CLAN_SIZE = 50;
+// Don't ping the same user more than once per 6 hours to avoid spam.
+const PER_USER_COOLDOWN_MS = 6 * 60 * 60 * 1000;
 
 export async function pollEmptySpotsOnce(ctx: AppContext, client: Client): Promise<void> {
   const roster = await ctx.clash.getClanMembers(ctx.cfg.CLASH_CLAN_TAG);
@@ -43,7 +45,9 @@ export async function pollEmptySpotsOnce(ctx: AppContext, client: Client): Promi
   // Only ping users who are still in the server and still have the vanquished role.
   // Also clean up subscriptions for users who left the server, or who clearly have
   // clan access again (i.e. they have a clan role).
+  // Additionally, enforce a per-user cooldown to avoid spamming the same user repeatedly.
   const pingable: string[] = [];
+  const now = Date.now();
   for (const id of subscribers) {
     const member = await guild.members.fetch(id).catch(() => null);
     if (!member) {
@@ -62,6 +66,13 @@ export async function pollEmptySpotsOnce(ctx: AppContext, client: Client): Promi
     }
 
     if (member.roles.cache.has(ctx.cfg.ROLE_NON_MEMBER_ID)) {
+      // Check per-user cooldown to avoid repeated pings.
+      const lastPingKey = `spots:user_last_ping:${id}`;
+      const lastPingRaw = dbGetJobState(ctx.db, lastPingKey);
+      const lastPing = lastPingRaw ? Number(lastPingRaw) : 0;
+      if (Number.isFinite(lastPing) && now - lastPing < PER_USER_COOLDOWN_MS) {
+        continue; // Skip this user - they were pinged recently.
+      }
       pingable.push(id);
     }
   }
@@ -69,12 +80,21 @@ export async function pollEmptySpotsOnce(ctx: AppContext, client: Client): Promi
   const mentions = pingable.length ? pingable.map((id) => `<@${id}>`).join(' ') : '';
   const plural = openSlots === 1 ? '' : 's';
 
-  await ch
-    .send({
-      content: `${mentions}${mentions ? '\n\n' : ''}Open clan spot detected: **${openSlots}** slot${plural} open.`,
-      allowedMentions: { users: pingable },
-    })
-    .catch(() => undefined);
+  // Only post if there's something to announce (either pings or just the status).
+  // If no one is pingable (all on cooldown), just update the state without posting.
+  if (pingable.length > 0) {
+    await ch
+      .send({
+        content: `${mentions}\n\nOpen clan spot detected: **${openSlots}** slot${plural} open.`,
+        allowedMentions: { users: pingable },
+      })
+      .catch(() => undefined);
+
+    // Record per-user ping timestamps.
+    for (const id of pingable) {
+      dbSetJobState(ctx.db, `spots:user_last_ping:${id}`, String(now));
+    }
+  }
 
   dbSetJobState(ctx.db, stateKey, String(openSlots));
 }

@@ -1,7 +1,7 @@
 import type { Guild, GuildMember } from 'discord.js';
 import type { AppContext } from '../types.js';
 import type { ClashClanMemberRole } from '../clashApi.js';
-import { dbGetJobState, dbSetJobState, dbUnsubscribeFromSpots } from '../db.js';
+import { dbGetJobState, dbSetJobState, dbUnsubscribeFromSpots, dbAudit } from '../db.js';
 
 function roleIdForClanRole(ctx: AppContext, role: ClashClanMemberRole): string {
   switch (role) {
@@ -113,7 +113,14 @@ export async function enforceUnlinkedMemberRoleReset(ctx: AppContext, member: Gu
   await applyMemberRoles(ctx, member, undefined, { assignVanquishedOnMissingClan: false });
   const leftoverRoles = member.roles.cache.filter((r) => r.id !== member.guild.id && !r.managed);
   if (leftoverRoles.size) {
-    await member.roles.remove(Array.from(leftoverRoles.keys())).catch(() => undefined);
+    await member.roles.remove(Array.from(leftoverRoles.keys())).catch((err: unknown) => {
+      const msg = err instanceof Error ? err.message : String(err);
+      dbAudit(
+        ctx.db,
+        'role_unlinked_cleanup_error',
+        `user=${member.id} roles=[${Array.from(leftoverRoles.keys()).join(',')}] err=${msg}`,
+      );
+    });
   }
 }
 
