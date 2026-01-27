@@ -1381,9 +1381,10 @@ export async function reconcileVerificationThreadForUser(
 }
 
 /**
- * Keep all linked users' profile threads unarchived.
- * Discord's max autoArchiveDuration is 7 days, so run this daily to prevent threads from disappearing.
- * This is a lightweight operation - it only unarchives, doesn't re-render or clean up.
+ * Keep all linked users' profile threads alive by touching them before they auto-archive.
+ * Discord's max autoArchiveDuration is 7 days. We "touch" threads by editing the profile
+ * message, which resets the archive timer WITHOUT sending any notifications.
+ * This runs frequently (every few hours) to prevent threads from ever archiving.
  */
 export async function keepProfileThreadsAlive(ctx: AppContext, client: any): Promise<void> {
   const channel = await client.channels.fetch(ctx.cfg.CHANNEL_VERIFICATION_ID).catch(() => null);
@@ -1394,14 +1395,20 @@ export async function keepProfileThreadsAlive(ctx: AppContext, client: any): Pro
     .prepare("SELECT key, value FROM job_state WHERE key LIKE 'verify:thread:%'")
     .all() as Array<{ key: string; value: string }>;
 
+  let touched = 0;
   let unarchived = 0;
   for (const p of pointers) {
     const threadId = String(p.value ?? '').trim();
     if (!threadId) continue;
 
+    // Extract userId from key like 'verify:thread:123456789'
+    const userId = p.key.replace('verify:thread:', '');
+    if (!userId) continue;
+
     const thread = await textChannel.threads.fetch(threadId).catch(() => null);
     if (!thread) continue;
 
+    // If already archived, silently unarchive it (fallback - ideally we touch before this happens).
     if (thread.archived) {
       await thread
         .setArchived(false, 'Keeping profile thread alive (scheduled job)')
@@ -1409,12 +1416,32 @@ export async function keepProfileThreadsAlive(ctx: AppContext, client: any): Pro
       unarchived++;
     }
 
+    // "Touch" the thread by editing its profile message. This resets the auto-archive
+    // timer without sending any notifications to the user.
+    const uiId = dbGetJobState(ctx.db, `profile:uiMessage:${userId}`);
+    if (uiId) {
+      const msg = await thread.messages.fetch(uiId).catch(() => null);
+      if (msg) {
+        // Re-edit with the same content to reset archive timer.
+        // We add an invisible timestamp that changes each edit to ensure Discord
+        // registers it as a real edit (some caching could skip no-op edits).
+        const existingContent = msg.content ?? '';
+        // Use a zero-width space + timestamp comment that's invisible to users.
+        const touchMarker = `\u200B`;
+        const newContent = existingContent.startsWith('\u200B') ? '' : touchMarker;
+        await msg.edit({ content: newContent }).catch(() => undefined);
+        touched++;
+      }
+    }
+
     // Small delay to avoid rate limits.
     await new Promise((r) => setTimeout(r, 100));
   }
 
-  if (unarchived > 0) {
-    console.log(`[keepProfileThreadsAlive] Unarchived ${unarchived} thread(s).`);
+  if (touched > 0 || unarchived > 0) {
+    console.log(
+      `[keepProfileThreadsAlive] Touched ${touched} thread(s), unarchived ${unarchived} thread(s).`,
+    );
   }
 }
 

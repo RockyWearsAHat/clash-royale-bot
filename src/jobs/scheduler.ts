@@ -80,9 +80,10 @@ export function startScheduler(ctx: AppContext, client: Client) {
     }
   });
 
-  // Keep profile threads alive by unarchiving them daily.
-  // Discord's max autoArchiveDuration is 7 days, so running every 6 hours is plenty.
-  cron.schedule('0 */6 * * *', async () => {
+  // Keep profile threads alive by touching them regularly (editing the profile message).
+  // This resets Discord's auto-archive timer without sending any notifications.
+  // Running every 2 hours is plenty - Discord's max autoArchiveDuration is 7 days.
+  cron.schedule('0 */2 * * *', async () => {
     try {
       await keepProfileThreadsAlive(ctx, client);
     } catch (err) {
