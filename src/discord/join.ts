@@ -981,6 +981,9 @@ export async function deleteProfileThreadForUser(
 /**
  * Clean up orphan threads: threads that exist but belong to users who are no longer in the server.
  * This runs periodically to catch any threads missed during guildMemberRemove events.
+ *
+ * IMPORTANT: This also unlinks users from the database and removes spot subscriptions when
+ * their threads are cleaned up - if a user isn't in the server, they should be fully removed.
  */
 export async function cleanupOrphanThreadsOnce(ctx: AppContext, client: any): Promise<void> {
   const channel = await client.channels.fetch(ctx.cfg.CHANNEL_VERIFICATION_ID).catch(() => null);
@@ -1001,12 +1004,21 @@ export async function cleanupOrphanThreadsOnce(ctx: AppContext, client: any): Pr
 
   const botId = String(client.user?.id ?? '');
 
+  // Helper to fully remove a user who has left the server
+  const fullyRemoveDepartedUser = (userId: string) => {
+    // Unlink from database
+    ctx.db.prepare('DELETE FROM user_links WHERE discord_user_id = ?').run(userId);
+    // Remove spot subscriptions
+    ctx.db.prepare('DELETE FROM spot_subscriptions WHERE discord_user_id = ?').run(userId);
+  };
+
   // Collect all tracked thread pointers from DB
   const pointers = ctx.db
     .prepare("SELECT key, value FROM job_state WHERE key LIKE 'verify:thread:%'")
     .all() as Array<{ key: string; value: string }>;
 
   let cleaned = 0;
+  let unlinked = 0;
   for (const p of pointers) {
     const userId = p.key.replace('verify:thread:', '');
     if (!userId) continue;
@@ -1015,22 +1027,77 @@ export async function cleanupOrphanThreadsOnce(ctx: AppContext, client: any): Pr
     const member = await guild.members.fetch(userId).catch(() => null);
     if (member) continue; // User is still in server, skip
 
-    // User is not in server - delete their thread
+    // User is not in server - delete their thread AND unlink them
     await deleteProfileThreadForUser(ctx, client, userId);
+    fullyRemoveDepartedUser(userId);
     cleaned++;
+    unlinked++;
+    dbAudit(ctx.db, 'orphan_cleanup_unlinked', `user=${userId} reason=not_in_server`);
 
     await new Promise((r) => setTimeout(r, 150));
   }
 
   // Also scan for bot-managed threads that don't have a pointer (edge cases)
-  const activeRes = await textChannel.threads.fetchActive().catch(() => null);
-  const activeThreads: ThreadChannel[] = activeRes?.threads?.values
-    ? Array.from(activeRes.threads.values())
-    : [];
+  // We need to check both active AND archived threads
+  const listAllBotManagedThreads = async (): Promise<ThreadChannel[]> => {
+    const byId = new Map<string, ThreadChannel>();
 
-  for (const thread of activeThreads) {
-    if (!isBotManagedThreadName(thread.name)) continue;
+    // Active threads
+    const active = await textChannel.threads.fetchActive().catch(() => null);
+    if (active?.threads?.values) {
+      for (const t of active.threads.values()) {
+        if (isBotManagedThreadName(t.name)) byId.set(t.id, t);
+      }
+    }
 
+    // Archived private threads (paginated)
+    let before: string | undefined = undefined;
+    let pages = 0;
+    while (pages < 10) {
+      const res: any = await textChannel.threads
+        .fetchArchived({ type: 'private', limit: 100, before })
+        .catch(() => null);
+      if (!res) break;
+
+      const threads: ThreadChannel[] = Array.from(res.threads.values());
+      for (const t of threads) {
+        if (isBotManagedThreadName(t.name)) byId.set(t.id, t);
+      }
+
+      pages++;
+      if (!threads.length) break;
+      before = String(threads[threads.length - 1]?.id ?? '');
+      const hasMore = Boolean((res as any)?.hasMore);
+      if (!hasMore) break;
+    }
+
+    // Archived public threads (paginated)
+    before = undefined;
+    pages = 0;
+    while (pages < 5) {
+      const res: any = await textChannel.threads
+        .fetchArchived({ type: 'public', limit: 100, before })
+        .catch(() => null);
+      if (!res) break;
+
+      const threads: ThreadChannel[] = Array.from(res.threads.values());
+      for (const t of threads) {
+        if (isBotManagedThreadName(t.name)) byId.set(t.id, t);
+      }
+
+      pages++;
+      if (!threads.length) break;
+      before = String(threads[threads.length - 1]?.id ?? '');
+      const hasMore = Boolean((res as any)?.hasMore);
+      if (!hasMore) break;
+    }
+
+    return Array.from(byId.values());
+  };
+
+  const allBotManagedThreads = await listAllBotManagedThreads();
+
+  for (const thread of allBotManagedThreads) {
     // Get thread members to find the owner
     const members = await thread.members.fetch().catch(() => null);
     if (!members) continue;
@@ -1044,9 +1111,16 @@ export async function cleanupOrphanThreadsOnce(ctx: AppContext, client: any): Pr
       const ownerId = nonBotMembers[0].id;
       const member = await guild.members.fetch(ownerId).catch(() => null);
       if (!member) {
-        // Owner left the server - delete the thread
+        // Owner left the server - delete the thread AND unlink them
         await deleteProfileThreadForUser(ctx, client, ownerId);
+        fullyRemoveDepartedUser(ownerId);
         cleaned++;
+        unlinked++;
+        dbAudit(
+          ctx.db,
+          'orphan_cleanup_unlinked',
+          `user=${ownerId} thread=${thread.id} reason=owner_not_in_server`,
+        );
         await new Promise((r) => setTimeout(r, 150));
       }
     } else if (nonBotMembers.length === 0) {
@@ -1058,12 +1132,37 @@ export async function cleanupOrphanThreadsOnce(ctx: AppContext, client: any): Pr
         await thread.setArchived(true).catch(() => undefined);
       }
       cleaned++;
+      dbAudit(ctx.db, 'orphan_cleanup_botonly', `thread=${thread.id} name=${thread.name}`);
       await new Promise((r) => setTimeout(r, 150));
     }
   }
 
-  if (cleaned > 0) {
-    console.log(`[cleanupOrphanThreadsOnce] Cleaned up ${cleaned} orphan thread(s).`);
+  // Final pass: check ALL linked users in the database and unlink anyone who is no longer in the server
+  // This catches cases where a user was linked but their thread was already deleted somehow
+  const allLinkedUsers = ctx.db.prepare('SELECT discord_user_id FROM user_links').all() as Array<{
+    discord_user_id: string;
+  }>;
+
+  for (const row of allLinkedUsers) {
+    const member = await guild.members.fetch(row.discord_user_id).catch(() => null);
+    if (member) continue; // User is still in server, skip
+
+    // User is not in server - unlink them
+    fullyRemoveDepartedUser(row.discord_user_id);
+    unlinked++;
+    dbAudit(
+      ctx.db,
+      'orphan_cleanup_unlinked_no_thread',
+      `user=${row.discord_user_id} reason=linked_but_not_in_server`,
+    );
+
+    await new Promise((r) => setTimeout(r, 50));
+  }
+
+  if (cleaned > 0 || unlinked > 0) {
+    console.log(
+      `[cleanupOrphanThreadsOnce] Cleaned up ${cleaned} orphan thread(s), unlinked ${unlinked} departed user(s).`,
+    );
   }
 }
 

@@ -20,6 +20,7 @@ import {
   repairVerificationThreadsOnce,
   unarchiveAllTrackedThreads,
   deleteProfileThreadForUser,
+  cleanupOrphanThreadsOnce,
 } from './discord/join.js';
 import { WarLogsCommand, WarStatsCommand } from './discord/warstats.js';
 import { handleWarlogsPublishButton } from './discord/warstats.js';
@@ -188,6 +189,20 @@ client.once('ready', async () => {
       guild = await client.guilds.fetch(cfg.GUILD_ID);
     } catch {
       guild = null;
+    }
+
+    // FIRST: Clean up orphan threads and unlink departed users immediately on startup.
+    // This ensures any users who left while the bot was offline are fully cleaned up
+    // before we start creating/reconciling threads for current members.
+    try {
+      if (guild) {
+        console.log('Cleaning up orphan threads and departed users...');
+        await cleanupOrphanThreadsOnce(ctx, client);
+        console.log('Orphan cleanup complete.');
+      }
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      console.warn('Failed to clean up orphan threads on startup:', msg);
     }
 
     // Always enforce channel permissions on startup so operators don't need to run a manual command.
