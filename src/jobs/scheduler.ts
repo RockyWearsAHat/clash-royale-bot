@@ -2,7 +2,11 @@ import cron from 'node-cron';
 import type { Client } from 'discord.js';
 import type { AppContext } from '../types.js';
 import { syncRolesOnce } from '../discord/roleSync.js';
-import { reconcileVerificationThreadForUser, keepProfileThreadsAlive } from '../discord/join.js';
+import {
+  reconcileVerificationThreadForUser,
+  keepProfileThreadsAlive,
+  cleanupOrphanThreadsOnce,
+} from '../discord/join.js';
 import { enforceChannelPermissions } from '../discord/permissions.js';
 import { pollWarOnce, primeWarDaySnapshotSchedule } from './war.js';
 import { dbGetJobState, dbSetJobState } from '../db.js';
@@ -94,11 +98,32 @@ export function startScheduler(ctx: AppContext, client: Client) {
     }
   });
 
+  // Clean up orphan threads (threads belonging to users who left the server).
+  // Runs every 6 hours as a redundancy check - primary cleanup happens on guildMemberRemove.
+  cron.schedule('0 */6 * * *', async () => {
+    try {
+      await cleanupOrphanThreadsOnce(ctx, client);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      ctx.db
+        .prepare('INSERT INTO audit_log(type, message) VALUES(?, ?)')
+        .run('orphan_thread_cleanup_error', msg);
+    }
+  });
+
   // Also run once at startup to immediately unarchive any threads that archived while the bot was down.
   void keepProfileThreadsAlive(ctx, client).catch((err) => {
     const msg = err instanceof Error ? err.message : String(err);
     ctx.db
       .prepare('INSERT INTO audit_log(type, message) VALUES(?, ?)')
       .run('keep_threads_alive_startup_error', msg);
+  });
+
+  // Run orphan cleanup once at startup to clean up any threads from users who left while bot was down.
+  void cleanupOrphanThreadsOnce(ctx, client).catch((err) => {
+    const msg = err instanceof Error ? err.message : String(err);
+    ctx.db
+      .prepare('INSERT INTO audit_log(type, message) VALUES(?, ?)')
+      .run('orphan_thread_cleanup_startup_error', msg);
   });
 }

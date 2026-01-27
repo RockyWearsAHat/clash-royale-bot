@@ -918,6 +918,156 @@ async function getOrCreateVerificationThread(
 }
 
 /**
+ * Delete a user's profile/verification thread and clean up all associated job_state entries.
+ * Called when a user leaves the server or when we detect an orphan thread.
+ */
+export async function deleteProfileThreadForUser(
+  ctx: AppContext,
+  client: any,
+  userId: string,
+): Promise<{ deleted: boolean; reason?: string }> {
+  const channel = await client.channels.fetch(ctx.cfg.CHANNEL_VERIFICATION_ID).catch(() => null);
+  if (!channel || channel.type !== ChannelType.GuildText) {
+    return { deleted: false, reason: 'verification_channel_not_found' };
+  }
+  const textChannel = channel as TextChannel;
+
+  const stateKey = `verify:thread:${userId}`;
+  const threadId = dbGetJobState(ctx.db, stateKey);
+
+  let threadDeleted = false;
+
+  if (threadId) {
+    const thread = await textChannel.threads.fetch(threadId).catch(() => null);
+    if (thread) {
+      try {
+        await thread.delete(`User ${userId} left the server`);
+        threadDeleted = true;
+      } catch (e) {
+        // Fallback: lock + archive if delete fails
+        await thread
+          .setLocked(true, `User ${userId} left the server (delete failed)`)
+          .catch(() => undefined);
+        await thread
+          .setArchived(true, `User ${userId} left the server (delete failed)`)
+          .catch(() => undefined);
+        const msg = e instanceof Error ? e.message : String(e);
+        dbAudit(
+          ctx.db,
+          'thread_delete_on_leave_failed',
+          `user=${userId} thread=${threadId} err=${msg}`,
+        );
+      }
+    }
+  }
+
+  // Clean up all associated job_state entries
+  dbDeleteJobState(ctx.db, stateKey);
+  dbDeleteJobState(ctx.db, `profile:uiMessage:${userId}`);
+  dbDeleteJobState(ctx.db, `profile:infoMessage:${userId}`);
+  dbDeleteJobState(ctx.db, `profile:controlsMessage:${userId}`);
+  dbDeleteJobState(ctx.db, `profile:infoHash:${userId}`);
+  dbDeleteJobState(ctx.db, `profile:controlsHash:${userId}`);
+  dbDeleteJobState(ctx.db, pendingTagKey(userId));
+  dbDeleteJobState(ctx.db, pendingTagMessageKey(userId));
+  dbDeleteJobState(ctx.db, invalidTagMessageKey(userId));
+  dbDeleteJobState(ctx.db, `verify:hint:last:${userId}`);
+
+  dbAudit(ctx.db, 'thread_cleanup_for_departed_user', `user=${userId} deleted=${threadDeleted}`);
+
+  return { deleted: threadDeleted };
+}
+
+/**
+ * Clean up orphan threads: threads that exist but belong to users who are no longer in the server.
+ * This runs periodically to catch any threads missed during guildMemberRemove events.
+ */
+export async function cleanupOrphanThreadsOnce(ctx: AppContext, client: any): Promise<void> {
+  const channel = await client.channels.fetch(ctx.cfg.CHANNEL_VERIFICATION_ID).catch(() => null);
+  if (!channel || channel.type !== ChannelType.GuildText) return;
+  const textChannel = channel as TextChannel;
+
+  let guild: any;
+  try {
+    guild = await client.guilds.fetch(ctx.cfg.GUILD_ID);
+  } catch {
+    return;
+  }
+
+  const isBotManagedThreadName = (name: string | null | undefined) => {
+    const n = String(name ?? '').toLowerCase();
+    return n.startsWith('link-') || n.startsWith('verification —') || n.startsWith('profile -');
+  };
+
+  const botId = String(client.user?.id ?? '');
+
+  // Collect all tracked thread pointers from DB
+  const pointers = ctx.db
+    .prepare("SELECT key, value FROM job_state WHERE key LIKE 'verify:thread:%'")
+    .all() as Array<{ key: string; value: string }>;
+
+  let cleaned = 0;
+  for (const p of pointers) {
+    const userId = p.key.replace('verify:thread:', '');
+    if (!userId) continue;
+
+    // Check if user is still in the guild
+    const member = await guild.members.fetch(userId).catch(() => null);
+    if (member) continue; // User is still in server, skip
+
+    // User is not in server - delete their thread
+    await deleteProfileThreadForUser(ctx, client, userId);
+    cleaned++;
+
+    await new Promise((r) => setTimeout(r, 150));
+  }
+
+  // Also scan for bot-managed threads that don't have a pointer (edge cases)
+  const activeRes = await textChannel.threads.fetchActive().catch(() => null);
+  const activeThreads: ThreadChannel[] = activeRes?.threads?.values
+    ? Array.from(activeRes.threads.values())
+    : [];
+
+  for (const thread of activeThreads) {
+    if (!isBotManagedThreadName(thread.name)) continue;
+
+    // Get thread members to find the owner
+    const members = await thread.members.fetch().catch(() => null);
+    if (!members) continue;
+
+    const nonBotMembers = Array.from(members.values()).filter(
+      (m) => m.id !== botId && !m.user?.bot,
+    );
+
+    // If thread has exactly one non-bot member, check if they're in the server
+    if (nonBotMembers.length === 1) {
+      const ownerId = nonBotMembers[0].id;
+      const member = await guild.members.fetch(ownerId).catch(() => null);
+      if (!member) {
+        // Owner left the server - delete the thread
+        await deleteProfileThreadForUser(ctx, client, ownerId);
+        cleaned++;
+        await new Promise((r) => setTimeout(r, 150));
+      }
+    } else if (nonBotMembers.length === 0) {
+      // Bot-only thread with no user - delete it
+      try {
+        await thread.delete('Orphan thread cleanup: no non-bot members');
+      } catch {
+        await thread.setLocked(true).catch(() => undefined);
+        await thread.setArchived(true).catch(() => undefined);
+      }
+      cleaned++;
+      await new Promise((r) => setTimeout(r, 150));
+    }
+  }
+
+  if (cleaned > 0) {
+    console.log(`[cleanupOrphanThreadsOnce] Cleaned up ${cleaned} orphan thread(s).`);
+  }
+}
+
+/**
  * Unarchive all tracked profile/verification threads on startup.
  * This handles the case where the bot was offline when Discord auto-archived threads.
  * Runs early in the startup sequence so threads are visible before other operations.

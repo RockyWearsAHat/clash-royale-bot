@@ -19,6 +19,7 @@ import {
   refreshOpenNicknameMenuIfAny,
   repairVerificationThreadsOnce,
   unarchiveAllTrackedThreads,
+  deleteProfileThreadForUser,
 } from './discord/join.js';
 import { WarLogsCommand, WarStatsCommand } from './discord/warstats.js';
 import { handleWarlogsPublishButton } from './discord/warstats.js';
@@ -75,6 +76,24 @@ client.on('guildMemberAdd', async (member) => {
     await enforceUnlinkedMemberRoleReset(ctx, member);
 
     await ensureVerificationThreadForUser(ctx, client, member.id);
+  } catch {
+    // ignore
+  }
+});
+
+// Delete profile/verification threads when users leave the server.
+client.on('guildMemberRemove', async (member) => {
+  try {
+    if (member.guild.id !== cfg.GUILD_ID) return;
+    if (member.user.bot) return;
+
+    await deleteProfileThreadForUser(ctx, client, member.id);
+
+    // Also remove user_link if they were linked (optional cleanup)
+    ctx.db.prepare('DELETE FROM user_links WHERE discord_user_id = ?').run(member.id);
+
+    // Remove from spot subscriptions too
+    ctx.db.prepare('DELETE FROM spot_subscriptions WHERE discord_user_id = ?').run(member.id);
   } catch {
     // ignore
   }
